@@ -17,7 +17,12 @@ class Plugin(PluginBase):
         "dispatching hooks, runtime callbacks, and "
         "plugin communication across the framework"
     )
-    priority = -100
+    priority = -99
+
+    aliases = {
+    "perf": "Performance Internals",
+    "optimizer": "Performance Internals",
+}
 
     #
     # INTERNAL

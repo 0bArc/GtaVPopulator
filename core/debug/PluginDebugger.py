@@ -434,9 +434,23 @@ class PluginDebuggerWindow(QMainWindow):
     def plugin_hooks(self, plugin):
         hooks = []
 
+        plugin_class = plugin.__class__
+
         for hook_name in self.available_hooks():
             for callback_name in self.plugin_manager.callback_names(hook_name):
-                callback = getattr(plugin, callback_name, None)
+                #
+                # Only count hooks actually implemented
+                # by the plugin class itself.
+                #
+
+                if callback_name not in plugin_class.__dict__:
+                    continue
+
+                callback = getattr(
+                    plugin,
+                    callback_name,
+                    None,
+                )
 
                 if callable(callback):
                     hooks.append(callback_name)
@@ -551,10 +565,63 @@ class PluginDebuggerWindow(QMainWindow):
 
     def refresh_context_view(self):
         if not self.plugin_manager.context:
-            self.context_view.setPlainText("No context values.")
+            self.context_view.setHtml(
+                '<span style="color:#777">No context values.</span>'
+            )
             return
 
-        self.context_view.setPlainText(pformat(self.plugin_manager.context, width=100))
+        html = [
+            """
+            <div style="
+                font-family:Consolas;
+                font-size:12px;
+                color:white;
+            ">
+            """
+        ]
+
+        colors = {
+            "dict": "#8be9fd",
+            "list": "#ffb86c",
+            "key": "#50fa7b",
+            "value": "#f8f8f2",
+        }
+
+        for key, value in sorted(self.plugin_manager.context.items()):
+            if isinstance(value, dict):
+                color = colors["dict"]
+            elif isinstance(value, list):
+                color = colors["list"]
+            else:
+                color = colors["value"]
+
+            formatted = self.escape_html(
+                pformat(value, width=90)
+            )
+
+            html.append(
+                f"""
+                <div style="margin-bottom:10px;">
+                    <span style="
+                        color:{colors['key']};
+                        font-weight:bold;
+                    ">
+                        {self.escape_html(str(key))}
+                    </span>
+
+                    <pre style="
+                        margin:4px 0 0 12px;
+                        color:{color};
+                    ">
+    {formatted}
+                    </pre>
+                </div>
+                """
+            )
+
+        html.append("</div>")
+
+        self.context_view.setHtml("".join(html))
 
     def clear_event_log(self):
         self.plugin_manager.event_log.clear()

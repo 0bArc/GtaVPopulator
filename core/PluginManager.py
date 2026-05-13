@@ -330,6 +330,8 @@ class PluginManager:
         self.event_log = []
         self.context = {}
         self.loaded_files = set()
+        self._loaded_modules = set()
+        self._executed_hooks = set()
         self.bootstrap()
         self.register(BuiltInGtaPlugin())
         self.load_plugins()
@@ -413,18 +415,31 @@ class PluginManager:
         ]
 
     def load_plugin_file(self, plugin_file, bootstrap=False):
-        plugin_file = Path(plugin_file)
+        import importlib.util
+        import sys
+        import traceback
+        from pathlib import Path
 
-        if plugin_file.resolve() in self.loaded_files:
+        plugin_file = Path(plugin_file)
+        module_id = str(plugin_file.resolve())
+
+        # No double dipping: already processed this file once
+        if module_id in self.loaded_files:
             self.log_event("PLUGIN_SKIPPED", str(plugin_file), file=str(plugin_file))
             return None
 
         relative = plugin_file.relative_to(self.plugin_folder)
-        
+
         module_name = (
             "gta_populator_" +
             "_".join(relative.with_suffix("").parts)
         )
+
+        # Already living in the runtime? Then we do not wake it again
+        if module_name in sys.modules:
+            self.log_event("PLUGIN_SKIPPED", str(plugin_file), file=str(plugin_file))
+            self.loaded_files.add(module_id)
+            return sys.modules[module_name]
 
         try:
             self.log_event(
@@ -443,14 +458,23 @@ class PluginManager:
                 raise ImportError(f"Could not load plugin spec for {plugin_file}")
 
             module = importlib.util.module_from_spec(spec)
+
+            # We register it early so Python does not accidentally load it twice mid-flight
+            sys.modules[module_name] = module
+
+            # Mark as loaded before execution so recursion does not bite us later
+            self.loaded_files.add(module_id)
+
+            # Let the module breathe and execute its code once
             spec.loader.exec_module(module)
+
             has_plugin_class = hasattr(module, "Plugin")
             has_register = hasattr(module, "register")
 
             has_helper_patches = any(
-                callable(value)
-                and getattr(value, "__module__", "") == module.__name__
+                getattr(value, "__module__", None) == module.__name__
                 for value in vars(module).values()
+                if callable(value)
             )
 
             if has_register:
@@ -468,9 +492,10 @@ class PluginManager:
                     "Plugin file must define register(manager), Plugin, or Helper patches"
                 )
 
-            setattr(plugin, "__plugin_file__", str(plugin_file))
-            setattr(plugin, "__plugin_bootstrap__", bootstrap)
-            self.loaded_files.add(plugin_file.resolve())
+            if plugin is not None:
+                setattr(plugin, "__plugin_file__", str(plugin_file))
+                setattr(plugin, "__plugin_bootstrap__", bootstrap)
+
             self.log_event(
                 "PLUGIN_FILE_LOADED",
                 str(plugin_file),
