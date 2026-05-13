@@ -184,7 +184,19 @@ class PluginBase:
     def bootstrap_pipeline_hook(self, plugin_manager, state):
         return None
 
+    def ui_render(self, manager, window, slot, context):
+        return None
+
     def ui_render_hook(self, manager, window, slot, context):
+        return None
+
+    def ui_render_process(self, manager, window, slot, context):
+        return None
+
+    def ui_render_core(self, manager, window, slot, context):
+        return None
+
+    def ui_render_internal(self, manager, window, slot, context):
         return None
 
     def get_bundle_info(self, manager, bundle):
@@ -195,82 +207,56 @@ class PluginBase:
 
     def file_color(self, manager, file_data):
         return None
-    
-    
+
+    # Helper.patch targets (string values match callback_names / Helper.run keys)
+    _bundle_color = "bundle_color"
+    _file_color = "file_color"
+
+    def extension_point(self, manager, area, phase, *args, **kwargs):
+        return None
+
+    def extension_point_hook(self, manager, area, phase, *args, **kwargs):
+        return None
+
+    def extension_point_process(self, manager, area, phase, *args, **kwargs):
+        return None
+
+    def extension_point_core(self, manager, area, phase, *args, **kwargs):
+        return None
+
+    def extension_point_internal(self, manager, area, phase, *args, **kwargs):
+        return None
 
 
 def _noop(*args, **kwargs):
     return None
 
 
-_HOOK_BASE_AREAS = [
-    "app",
-    "plugin",
-    "bootstrap",
-    "config",
-    "path",
-    "scan",
-    "category",
-    "bundle",
-    "file",
-    "toggle",
-    "status",
-    "ui",
-    "debug",
-    "search",
-    "filter",
-    "sort",
-    "dependency",
-    "metrics",
-    "cache",
-    "render",
-]
-
-_HOOK_BASE_PHASES = [
-    "prepare",
-    "validate",
-    "process",
-    "enrich",
-    "normalize",
-    "before",
-    "after",
-    "finalize",
-]
-
-_HOOK_NAMES = [f"{area}_{phase}" for area in _HOOK_BASE_AREAS for phase in _HOOK_BASE_PHASES]
-_HOOK_NAMES.extend(
-    [
-        "file_color",
-        "bundle_color",
-        "row_render_process",
-        "row_render_bundle_process",
-        "row_render_file_process",
-        "before_action",
-        "after_action",
-        "before_ui_action",
-        "after_ui_action",
-        "before_scan_action",
-        "after_scan_action",
-        "before_toggle_action",
-        "after_toggle_action",
-    ]
+_EXTRA_HOOK_STEMS = (
+    "row_render_process",
+    "row_render_bundle_process",
+    "row_render_file_process",
+    "before_action",
+    "after_action",
+    "before_ui_action",
+    "after_ui_action",
+    "before_scan_action",
+    "after_scan_action",
+    "before_toggle_action",
+    "after_toggle_action",
 )
 
-for _name in _HOOK_NAMES:
-    # autosuggest-friendly identifiers for patching
-    setattr(PluginBase, f"_{_name}", _name)
-    setattr(PluginBase, f"_{_name}_hook", f"{_name}_hook")
-    setattr(PluginBase, f"_{_name}_process", f"{_name}_process")
-    setattr(PluginBase, f"_{_name}_core", f"{_name}_core")
-    setattr(PluginBase, f"_{_name}_internal", f"{_name}_internal")
-
-    # callable stubs for plugin implementations
-    if not hasattr(PluginBase, _name):
-        setattr(PluginBase, _name, _noop)
-    setattr(PluginBase, f"{_name}_hook", _noop)
-    setattr(PluginBase, f"{_name}_process", _noop)
-    setattr(PluginBase, f"{_name}_core", _noop)
-    setattr(PluginBase, f"{_name}_internal", _noop)
+for _stem in _EXTRA_HOOK_STEMS:
+    setattr(PluginBase, _stem, _noop)
+    setattr(PluginBase, f"{_stem}_hook", _noop)
+    setattr(PluginBase, f"{_stem}_process", _noop)
+    setattr(PluginBase, f"{_stem}_core", _noop)
+    setattr(PluginBase, f"{_stem}_internal", _noop)
+    setattr(PluginBase, f"_{_stem}", _stem)
+    setattr(PluginBase, f"_{_stem}_hook", f"{_stem}_hook")
+    setattr(PluginBase, f"_{_stem}_process", f"{_stem}_process")
+    setattr(PluginBase, f"_{_stem}_core", f"{_stem}_core")
+    setattr(PluginBase, f"_{_stem}_internal", f"{_stem}_internal")
 
 
 class BuiltInGtaPlugin(PluginBase):
@@ -565,6 +551,29 @@ class PluginManager:
                     results.append(result)
 
         self.log_event("HOOK_DONE", hook_name, hook=hook_name, results=len(results))
+        return results
+
+    def hook_extension(self, manager, area, phase, *args, **kwargs):
+        results = []
+        label = f"{area}.{phase}"
+        self.log_event("HOOK_EXTENSION_START", label, area=area, phase=phase)
+
+        for plugin in self.plugins:
+            for callback_name in self.callback_names("extension_point"):
+                result = self.call_plugin(
+                    plugin, callback_name, manager, area, phase, *args, **kwargs
+                )
+
+                if result is not None:
+                    results.append(result)
+
+        self.log_event(
+            "HOOK_EXTENSION_DONE",
+            label,
+            area=area,
+            phase=phase,
+            results=len(results),
+        )
         return results
 
     def first_result(self, hook_name, *args, **kwargs):

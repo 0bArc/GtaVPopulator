@@ -42,6 +42,14 @@ def hook_name_internal(...): pass
 
 Use `_hook` for public behavior, `_process` for data transformation, `_core` for app-level extension, and `_internal` for low-level manager behavior.
 
+### Declared hooks and extension grid
+
+First-class hooks the app calls (`before_scan`, `on_ui_ready`, …) live in a **finite list** in `core/plugin_hook_registry.py` (`DECLARED_HOOK_NAMES`). Debugger mock combo uses that list plus any `bootstrap_pipeline::<name>` entries discovered from loaded plugins.
+
+For extra lifecycle without adding new top-level hook names, implement **`extension_point`** (same five layer suffixes). Signature includes `area` and `phase` strings from `EXTENSION_AREAS` and `EXTENSION_PHASES` in the registry. Call from Python via `plugin_manager.hook_extension(manager, area, phase, *args, **kwargs)`.
+
+Bootstrap-only pipelines keep dynamic names: `bootstrap_pipeline_<pipeline>_<layer>(manager, state)`.
+
 ## Bootstrapping
 
 Bootstrap plugins can modify `manager.context`, register helper plugins, or prepare shared services before regular plugins load.

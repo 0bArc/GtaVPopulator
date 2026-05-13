@@ -23,6 +23,10 @@ Implement `ui_render` / `ui_render_hook` / … signature: `(manager, window, slo
 
 App pulls contributions once after `on_ui_ready`, then on each `refresh_ui` via `_apply_plugin_ui_slots`.
 
+## Extension point
+
+Optional `(area, phase)` grid — `PluginManager.hook_extension(manager, area, phase, ...)`. Areas/phases in `core/plugin_hook_registry.py`. Implement `extension_point_hook` etc. on `PluginBase` subclasses.
+
 ## New-plugin notice
 
 Static scan on `.py` → `__plugin_permission_report__`. If **dangerous** or any capability tag, and path not in config `reviewed_plugin_paths`, entry lands in `manager.context["plugin_review_queue"]`; main window shows centered card until **Got it**.

@@ -26,7 +26,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.PluginManager import PluginBase, PluginManager
+from core.PluginManager import PluginManager
+from core.plugin_hook_registry import (
+    DECLARED_HOOK_NAMES,
+    EXTENSION_AREAS,
+    EXTENSION_PHASES,
+    FIRST_RESULT_HOOKS,
+    discover_bootstrap_pipeline_methods,
+)
 
 
 class MockAppManager:
@@ -72,14 +79,26 @@ class PluginDebuggerWindow(QMainWindow):
         title.setObjectName("Title")
 
         self.hook_combo = QComboBox()
-        self.hook_combo.setMinimumWidth(220)
+        self.hook_combo.setMinimumWidth(200)
         self.hook_combo.addItems(self.available_hooks())
+        self.hook_combo.currentTextChanged.connect(self._on_hook_combo_changed)
+
+        self.extension_area_combo = QComboBox()
+        self.extension_area_combo.addItems(list(EXTENSION_AREAS))
+        self.extension_phase_combo = QComboBox()
+        self.extension_phase_combo.addItems(list(EXTENSION_PHASES))
+
+        self.pipeline_combo = QComboBox()
+        self.pipeline_combo.setMinimumWidth(120)
 
         reload_button = QPushButton("Reload Plugins")
         reload_button.clicked.connect(self.reload_plugins)
 
         run_button = QPushButton("Run Mock Hook")
         run_button.clicked.connect(self.run_mock_hook)
+
+        run_pipeline_button = QPushButton("Run bootstrap pipeline")
+        run_pipeline_button.clicked.connect(self.run_bootstrap_pipeline_mock)
 
         clear_button = QPushButton("Clear Log")
         clear_button.clicked.connect(self.clear_event_log)
@@ -88,10 +107,19 @@ class PluginDebuggerWindow(QMainWindow):
         toolbar.addStretch(1)
         toolbar.addWidget(QLabel("Hook"))
         toolbar.addWidget(self.hook_combo)
+        toolbar.addWidget(QLabel("ext area"))
+        toolbar.addWidget(self.extension_area_combo)
+        toolbar.addWidget(QLabel("ext phase"))
+        toolbar.addWidget(self.extension_phase_combo)
+        toolbar.addWidget(QLabel("pipeline"))
+        toolbar.addWidget(self.pipeline_combo)
         toolbar.addWidget(run_button)
+        toolbar.addWidget(run_pipeline_button)
         toolbar.addWidget(reload_button)
         toolbar.addWidget(clear_button)
         layout.addLayout(toolbar)
+
+        self._on_hook_combo_changed(self.hook_combo.currentText())
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
@@ -150,12 +178,19 @@ class PluginDebuggerWindow(QMainWindow):
         self.context_view.setLineWrapMode(QTextEdit.NoWrap)
         self.tabs.addTab(self.context_view, "Context")
 
+        self.debug_props = QTextEdit()
+        self.debug_props.setObjectName("Log")
+        self.debug_props.setReadOnly(True)
+        self.debug_props.setLineWrapMode(QTextEdit.NoWrap)
+        self.tabs.addTab(self.debug_props, "Runtime")
+
         splitter.addWidget(left)
         splitter.addWidget(self.tabs)
         splitter.setSizes([340, 780])
 
         layout.addWidget(splitter, 1)
         self.setCentralWidget(root)
+        self._refresh_pipeline_combo()
 
     def apply_theme(self):
         self.setStyleSheet(
@@ -241,19 +276,72 @@ class PluginDebuggerWindow(QMainWindow):
             """
         )
 
+    def refresh_debug_properties(self):
+        if not getattr(self, "debug_props", None) or not self.plugin_manager:
+            return
+
+        pm = self.plugin_manager
+        ctx = pm.context or {}
+        q = ctx.get("plugin_review_queue") or []
+        perm = ctx.get("permission_pipeline_last") or {}
+        lines = [
+            f"plugin_folder: {pm.plugin_folder}",
+            f"bootstrap_folder: {pm.bootstrap_folder}",
+            f"plugins_loaded: {len(pm.plugins)}",
+            f"errors: {len(pm.errors)}",
+            f"event_log_entries: {len(pm.event_log)}",
+            f"loaded_files: {len(pm.loaded_files)}",
+            f"declared_hook_names: {len(DECLARED_HOOK_NAMES)}",
+            f"extension_grid: {len(EXTENSION_AREAS)} x {len(EXTENSION_PHASES)}",
+            f"plugin_review_queue: {len(q)}",
+            f"permission_pipeline_last.stage: {perm.get('stage', '')}",
+            f"permission_pipeline_last.reports: {len(perm.get('reports', []) or [])}",
+        ]
+
+        if pm.event_log:
+            last = pm.event_log[-1]
+            lines.append(f"last_event: [{last.get('code')}] {last.get('message', '')}")
+
+        self.debug_props.setPlainText("\n".join(lines))
+
     def available_hooks(self):
+        names = list(DECLARED_HOOK_NAMES)
+        seen = set(names)
+        dynamic = []
+
+        if self.plugin_manager:
+            for plugin in self.plugin_manager.plugins:
+                for pipeline in discover_bootstrap_pipeline_methods(plugin):
+                    token = f"bootstrap_pipeline::{pipeline}"
+
+                    if token not in seen:
+                        seen.add(token)
+                        dynamic.append(token)
+
+        dynamic.sort()
+        return names + dynamic
+
+    def _refresh_pipeline_combo(self):
+        self.pipeline_combo.blockSignals(True)
+        self.pipeline_combo.clear()
         names = set()
 
-        for name in dir(PluginBase):
-            if name.startswith("_"):
-                continue
+        if self.plugin_manager:
+            for plugin in self.plugin_manager.plugins:
+                names.update(discover_bootstrap_pipeline_methods(plugin))
 
-            value = getattr(PluginBase, name)
+        if not names:
+            names.add("permission")
 
-            if callable(value):
-                names.add(self.base_hook_name(name))
+        for name in sorted(names):
+            self.pipeline_combo.addItem(name)
 
-        return sorted(names)
+        self.pipeline_combo.blockSignals(False)
+
+    def _on_hook_combo_changed(self, text):
+        is_ext = text == "extension_point"
+        self.extension_area_combo.setEnabled(is_ext)
+        self.extension_phase_combo.setEnabled(is_ext)
 
     def base_hook_name(self, name):
         for suffix in ("_hook", "_process", "_core", "_internal"):
@@ -266,6 +354,12 @@ class PluginDebuggerWindow(QMainWindow):
         self.plugin_manager = PluginManager(self.plugin_folder)
         self.mock_app = MockAppManager(self.plugin_manager)
         self.plugin_manager.hook("on_app_start", self.mock_app)
+        self.hook_combo.blockSignals(True)
+        self.hook_combo.clear()
+        self.hook_combo.addItems(self.available_hooks())
+        self.hook_combo.blockSignals(False)
+        self._refresh_pipeline_combo()
+        self._on_hook_combo_changed(self.hook_combo.currentText())
         self.refresh_all()
 
     def refresh_all(self):
@@ -274,6 +368,7 @@ class PluginDebuggerWindow(QMainWindow):
         self.refresh_event_log()
         self.refresh_error_log()
         self.refresh_context_view()
+        self.refresh_debug_properties()
 
     def refresh_plugin_table(self):
         plugins = self.plugin_manager.plugins
@@ -316,6 +411,12 @@ class PluginDebuggerWindow(QMainWindow):
             f"Bootstrap: {getattr(plugin, '__plugin_bootstrap__', False)}",
             "",
         ]
+        report = getattr(plugin, "__plugin_permission_report__", None)
+
+        if report:
+            overview.append(f"Permission scan (heuristic): dangerous={report.get('dangerous')}")
+            overview.append(f"Permissions: {', '.join(report.get('permissions') or [])}")
+            overview.append("")
 
         data = [
             "Extensions",
@@ -413,6 +514,13 @@ class PluginDebuggerWindow(QMainWindow):
 
         return "\n".join(f"  - {key}: {value}" for key, value in sorted(values.items()))
 
+    def _iter_callbacks_for_hook_row(self, hook_name):
+        if hook_name.startswith("bootstrap_pipeline::"):
+            pipeline = hook_name.split("::", 1)[1]
+            return self.plugin_manager.callback_names(f"bootstrap_pipeline_{pipeline}")
+
+        return self.plugin_manager.callback_names(hook_name)
+
     def refresh_plugin_hooks(self, plugin):
         self.plugin_hooks_view.clear()
 
@@ -433,24 +541,14 @@ class PluginDebuggerWindow(QMainWindow):
 
     def plugin_hooks(self, plugin):
         hooks = []
-
         plugin_class = plugin.__class__
 
         for hook_name in self.available_hooks():
-            for callback_name in self.plugin_manager.callback_names(hook_name):
-                #
-                # Only count hooks actually implemented
-                # by the plugin class itself.
-                #
-
+            for callback_name in self._iter_callbacks_for_hook_row(hook_name):
                 if callback_name not in plugin_class.__dict__:
                     continue
 
-                callback = getattr(
-                    plugin,
-                    callback_name,
-                    None,
-                )
+                callback = getattr(plugin, callback_name, None)
 
                 if callable(callback):
                     hooks.append(callback_name)
@@ -461,7 +559,7 @@ class PluginDebuggerWindow(QMainWindow):
         rows = []
 
         for hook_name in self.available_hooks():
-            for callback_name in self.plugin_manager.callback_names(hook_name):
+            for callback_name in self._iter_callbacks_for_hook_row(hook_name):
                 for plugin in self.plugin_manager.plugins:
                     callback = getattr(plugin, callback_name, None)
 
@@ -554,6 +652,9 @@ class PluginDebuggerWindow(QMainWindow):
         if "CALL" in code or "HOOK" in code:
             return "#c6a7ff"
 
+        if "EXTENSION" in code:
+            return "#bd93f9"
+
         return "#ffffff"
 
     def escape_html(self, value):
@@ -627,8 +728,45 @@ class PluginDebuggerWindow(QMainWindow):
         self.plugin_manager.event_log.clear()
         self.refresh_event_log()
 
+    def run_bootstrap_pipeline_mock(self):
+        name = self.pipeline_combo.currentText()
+
+        if not name:
+            return
+
+        self.plugin_manager.log_event(
+            "MOCK_BOOTSTRAP_PIPELINE",
+            name,
+            pipeline=name,
+        )
+        self.plugin_manager.run_bootstrap_pipeline(
+            name, {"stage": "debug", "reports": []}
+        )
+        self.refresh_all()
+
     def run_mock_hook(self):
         hook_name = self.hook_combo.currentText()
+
+        if hook_name.startswith("bootstrap_pipeline::"):
+            self.run_bootstrap_pipeline_named(hook_name.split("::", 1)[1])
+            return
+
+        if hook_name == "extension_point":
+            self.plugin_manager.log_event(
+                "MOCK_HOOK",
+                hook_name,
+                hook=hook_name,
+                area=self.extension_area_combo.currentText(),
+                phase=self.extension_phase_combo.currentText(),
+            )
+            self.plugin_manager.hook_extension(
+                self.mock_app,
+                self.extension_area_combo.currentText(),
+                self.extension_phase_combo.currentText(),
+            )
+            self.refresh_all()
+            return
+
         args = self.mock_args(hook_name)
 
         self.plugin_manager.log_event(
@@ -645,17 +783,19 @@ class PluginDebuggerWindow(QMainWindow):
 
         self.refresh_all()
 
+    def run_bootstrap_pipeline_named(self, name):
+        self.plugin_manager.log_event(
+            "MOCK_BOOTSTRAP_PIPELINE",
+            name,
+            pipeline=name,
+        )
+        self.plugin_manager.run_bootstrap_pipeline(
+            name, {"stage": "debug", "reports": []}
+        )
+        self.refresh_all()
+
     def result_hooks(self):
-        return {
-            "normalize_file_path",
-            "should_include_file",
-            "detect_category",
-            "clean_bundle_name",
-            "get_bundle_name",
-            "format_bundle_row",
-            "format_file_row",
-            "format_status",
-        }
+        return set(FIRST_RESULT_HOOKS)
 
     def mock_args(self, hook_name):
         path = Path("mock/GTA V/scripts/example.lua")
@@ -700,6 +840,21 @@ class PluginDebuggerWindow(QMainWindow):
             "format_bundle_row": [self.mock_app, bundle, "Mock row"],
             "format_file_row": [self.mock_app, file_data, "Mock file row"],
             "format_status": [self.mock_app, "Mock status"],
+            "get_bundle_info": [self.mock_app, bundle],
+            "bundle_color": [self.mock_app, bundle],
+            "file_color": [self.mock_app, file_data],
+            "ui_render": [self.mock_app, self, "toolbar", {}],
+            "row_render_process": [self.mock_app, bundle, "mock row"],
+            "row_render_bundle_process": [self.mock_app, bundle, "mock bundle row"],
+            "row_render_file_process": [self.mock_app, file_data, "mock file row"],
+            "before_action": [self.mock_app, "mock_action"],
+            "after_action": [self.mock_app, "mock_action"],
+            "before_ui_action": [self.mock_app, "mock_ui"],
+            "after_ui_action": [self.mock_app, "mock_ui"],
+            "before_scan_action": [self.mock_app, False],
+            "after_scan_action": [self.mock_app, False],
+            "before_toggle_action": [self.mock_app, bundle, False],
+            "after_toggle_action": [self.mock_app, bundle, False],
         }
 
         return args_by_hook.get(hook_name, [self.mock_app])
