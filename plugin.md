@@ -2,6 +2,8 @@
 
 Plugins live in `plugins/` and are loaded automatically from `.py` files. Bootstrap plugins live in `plugins/bootstrap/` or use the filename pattern `*_bootstrap.py`; they load before normal plugins and can prepare or extend the plugin manager itself.
 
+Short cheat sheet for bootstrap/UI pipelines + permission card: see **`plugin-ui-pipelines.md`**.
+
 ## Basic Plugin
 
 ```python
@@ -55,6 +57,77 @@ Available bootstrap hooks:
 - `on_plugin_error`
 
 Each also supports `_hook`, `_process`, `_core`, and `_internal`.
+
+## Bootstrap pipelines (`run_bootstrap_pipeline`)
+
+After bootstrap `.py` files load (and again after normal plugins load), the manager runs named pipelines:
+
+```python
+manager.run_bootstrap_pipeline("permission", {"stage": "bootstrap", "reports": []})
+```
+
+Plugins participate by implementing callbacks whose prefix matches the pipeline name:
+
+- `bootstrap_pipeline_<name>`
+- `bootstrap_pipeline_<name>_hook`, `_process`, `_core`, `_internal`
+
+Each receives `(manager, state)`. Return a **new or mutated `state`** dict/object to pass forward; `None` leaves state unchanged.
+
+Stock pipeline: **`permission`** in `plugins/bootstrap/bootstrap_pipelines.py` — scans plugin sources for heuristic capability tags. Latest output also stored on `manager.context["permission_pipeline_last"]`.
+
+## UI render pipeline (`run_ui_render_pipeline`)
+
+Gui calls `manager.plugin_manager.run_ui_render_pipeline(manager, window, slot, context)` for fixed slots. Plugins implement:
+
+- `ui_render(manager, window, slot, context)`
+- or `ui_render_hook`, `_process`, `_core`, `_internal` with same signature
+
+Allowed `slot` values: `toolbar`, `menu`, `sidebar`, `context_action`, `status_widget`, `detail`.
+
+**Return value:** `None` (skip), a single contribution, or a list/tuple of contributions.
+
+Examples:
+
+```python
+from PyQt5.QtWidgets import QMessageBox
+
+def ui_render_hook(self, manager, window, slot, context):
+    if slot != "toolbar":
+        return None
+    def _go():
+        QMessageBox.information(window, "Demo", "Hello from plugin")
+    return {"type": "action", "text": "Demo", "callback": _go}
+```
+
+```python
+def ui_render_hook(self, manager, window, slot, context):
+    if slot != "sidebar":
+        return None
+    lab = QLabel("Sidebar note")
+    return {"widget": lab}
+```
+
+```python
+def ui_render_hook(self, manager, window, slot, context):
+    if slot != "context_action":
+        return None
+    return {
+        "type": "action",
+        "target": "bundle",  # or "file"
+        "text": "Log bundle",
+        "callback": lambda bundle: print(bundle["name"]),
+    }
+```
+
+The main window merges toolbar/menu actions, embeds widgets in the plugin sidebar column, status row, and detail area, and attaches bundle/file context menus from `context_action` entries.
+
+## Plugin permission scan & review UI
+
+On each loaded non-bootstrap plugin file, the manager runs a **static** scan (`core/plugin_permissions.py`) and attaches **`__plugin_permission_report__`** on the plugin object (`permissions`, `dangerous`, etc.). This is heuristic text matching, not enforcement.
+
+If the report is “interesting” (has permission tags **or** `dangerous == True`) **and** the resolved file path is not in `reviewed_plugin_paths` inside `gta5populator_config.json`, an item is queued in **`manager.context["plugin_review_queue"]`**. The desktop app shows a centered card (permissions summary + danger flag + path). **Got it** adds the path to `reviewed_plugin_paths` and persists config.
+
+Bootstrap-only plugins are scanned by the **`permission`** pipeline but do not enqueue the review card on their own unless loaded as normal plugins.
 
 ## Debugger
 
@@ -149,4 +222,4 @@ Higher priority numbers run later and can override earlier plugins in `first_res
 
 ## Current Use Cases
 
-You can add support for new file types, create new categories, override bundle naming, add UI actions, open files or folders, track scan results, change status text, or add future app features without changing most of `app.py`.
+You can add support for new file types, create new categories, override bundle naming, add UI actions, open files or folders, track scan results, change status text, register **toolbar/menu/sidebar/status/detail/context menu** contributions via `ui_render`, run shared **bootstrap pipelines** (e.g. permission inventory), or add future app features without changing most of `app.py`.

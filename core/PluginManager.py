@@ -181,7 +181,7 @@ class PluginBase:
     def format_status(self, manager, default_text):
         return None
 
-    def bootstrap_pipeline_hook(self, plugin_manager, pipeline_name, state):
+    def bootstrap_pipeline_hook(self, plugin_manager, state):
         return None
 
     def ui_render_hook(self, manager, window, slot, context):
