@@ -557,7 +557,8 @@ class Gta5PopulatorWindow(QMainWindow):
 
         buttons = QHBoxLayout()
         ok = QPushButton("Got it")
-        ok.clicked.connect(lambda: self._ack_plugin_review(entry.get("path")))
+        path_key = entry.get("path")
+        ok.clicked.connect(lambda checked=False, p=path_key: self._ack_plugin_review(p))
         buttons.addStretch(1)
         buttons.addWidget(ok)
 
