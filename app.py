@@ -320,8 +320,7 @@ class Gta5PopulatorWindow(QMainWindow):
         self._plugin_context_file = []
 
         self.setWindowTitle("GTA V Mod Manager")
-        self.resize(1060, 780)
-        self.setMinimumSize(880, 640)
+        self._apply_startup_geometry()
 
         self.build_ui()
         self.apply_theme()
@@ -334,6 +333,13 @@ class Gta5PopulatorWindow(QMainWindow):
         super().resizeEvent(event)
         self._layout_plugin_review_card()
 
+    def _apply_startup_geometry(self):
+        desk = QApplication.desktop().availableGeometry()
+        w = max(960, min(1400, int(desk.width() * 0.72)))
+        h = max(620, min(1000, int(desk.height() * 0.78)))
+        self.resize(w, h)
+        self.setMinimumSize(720, 520)
+
     def _layout_plugin_review_card(self):
         if not hasattr(self, "_plugin_review_card"):
             return
@@ -343,15 +349,14 @@ class Gta5PopulatorWindow(QMainWindow):
         if not root or not self._plugin_review_card.isVisible():
             return
 
-        margin = 18
-        card_w = min(440, max(280, root.width() - margin * 2))
-        card_h = min(260, max(160, root.height() // 3))
-        x = (root.width() - card_w) // 2
-        y = (root.height() - card_h) // 2
-        self._plugin_review_card.setGeometry(x, y, card_w, card_h)
+        strip_h = 52
+        self._plugin_review_card.setGeometry(0, 0, root.width(), strip_h)
 
     def _build_plugin_menubar(self):
         menu_bar = self.menuBar()
+        menu_bar.setCornerWidget(self.debug_button, Qt.TopLeftCorner)
+        menu_bar.setCornerWidget(self.refresh_button, Qt.TopRightCorner)
+
         file_menu = menu_bar.addMenu("File")
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
@@ -528,45 +533,36 @@ class Gta5PopulatorWindow(QMainWindow):
         if existing:
             QWidget().setLayout(existing)
 
-        layout = QVBoxLayout(self._plugin_review_card)
-        layout.setSpacing(8)
+        main = QHBoxLayout(self._plugin_review_card)
+        main.setContentsMargins(8, 4, 8, 4)
+        main.setSpacing(8)
 
-        title = QLabel("New plugin")
-        title.setObjectName("PluginReviewTitle")
-        title.setText(f"New plugin: {entry.get('plugin_name', 'Unknown')}")
+        badge = QLabel("!")
+        badge.setObjectName("PluginReviewBadge")
+        badge.setFixedWidth(22)
+        badge.setAlignment(Qt.AlignCenter)
 
         perms = entry.get("report", {}).get("permissions") or []
-        perm_text = ", ".join(perms) if perms else "No special capability markers detected"
-
-        body = QLabel(perm_text)
-        body.setObjectName("PluginReviewPerms")
-        body.setWordWrap(True)
-
+        perm_text = ", ".join(perms) if perms else "no markers"
         danger = entry.get("report", {}).get("dangerous")
-        risk = QLabel(
-            "Flagged as potentially dangerous (dynamic exec / subprocess / etc.)."
-            if danger
-            else "Not flagged as high-risk by static scan."
+        tag = "DANGER " if danger else ""
+
+        summary = QLabel(
+            f"{tag}{entry.get('plugin_name', '?')}  |  {perm_text}  |  {entry.get('file', '')}"
         )
-        risk.setObjectName("PluginReviewDanger" if danger else "PanelHint")
-        risk.setWordWrap(True)
+        summary.setObjectName("PluginReviewStripText")
+        summary.setWordWrap(True)
+        summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
-        path_label = QLabel(entry.get("file", ""))
-        path_label.setObjectName("PanelHint")
-        path_label.setWordWrap(True)
-
-        buttons = QHBoxLayout()
-        ok = QPushButton("Got it")
+        ok = QPushButton("OK")
+        ok.setObjectName("CornerButton")
+        ok.setFixedHeight(22)
         path_key = entry.get("path")
         ok.clicked.connect(lambda checked=False, p=path_key: self._ack_plugin_review(p))
-        buttons.addStretch(1)
-        buttons.addWidget(ok)
 
-        layout.addWidget(title)
-        layout.addWidget(body)
-        layout.addWidget(risk)
-        layout.addWidget(path_label)
-        layout.addLayout(buttons)
+        main.addWidget(badge, 0)
+        main.addWidget(summary, 1)
+        main.addWidget(ok, 0)
 
     def _ack_plugin_review(self, path):
         if path:
@@ -580,13 +576,25 @@ class Gta5PopulatorWindow(QMainWindow):
         self._present_plugin_review_queue()
 
     def build_ui(self):
+        self.debug_button = QPushButton("Debug")
+        self.debug_button.setObjectName("CornerWarnButton")
+        self.debug_button.setFixedHeight(22)
+        self.debug_button.clicked.connect(self.open_plugin_debugger)
+
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.setObjectName("CornerButton")
+        self.refresh_button.setFixedHeight(22)
+        self.refresh_button.clicked.connect(self.refresh_scan)
+
         root = QWidget()
+        root.setObjectName("AppRoot")
         root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(14, 12, 14, 10)
-        root_layout.setSpacing(8)
+        root_layout.setContentsMargins(4, 2, 4, 4)
+        root_layout.setSpacing(4)
 
         header = QHBoxLayout()
         title_area = QVBoxLayout()
+        title_area.setSpacing(0)
 
         title = QLabel("GTA V MOD MANAGER")
         title.setObjectName("Title")
@@ -598,19 +606,7 @@ class Gta5PopulatorWindow(QMainWindow):
         title_area.addWidget(title)
         title_area.addWidget(self.subtitle)
 
-        header.addLayout(title_area)
-        header.addStretch(1)
-
-        self.refresh_button = QPushButton("Refresh")
-        self.refresh_button.setObjectName("SecondaryButton")
-        self.refresh_button.clicked.connect(self.refresh_scan)
-
-        self.debug_button = QPushButton("Debug")
-        self.debug_button.setObjectName("SecondaryButton")
-        self.debug_button.clicked.connect(self.open_plugin_debugger)
-
-        header.addWidget(self.debug_button)
-        header.addWidget(self.refresh_button)
+        header.addLayout(title_area, 1)
 
         root_layout.addLayout(header)
 
@@ -630,8 +626,8 @@ class Gta5PopulatorWindow(QMainWindow):
         plugin_sidebar_layout = QVBoxLayout(plugin_sidebar)
         plugin_sidebar_layout.setContentsMargins(0, 0, 0, 0)
         plugin_sidebar_layout.setSpacing(6)
-        plugin_sidebar_hint = QLabel("Plugin sidebar")
-        plugin_sidebar_hint.setObjectName("PanelHint")
+        plugin_sidebar_hint = QLabel("Extensions")
+        plugin_sidebar_hint.setObjectName("SectionLabel")
         plugin_sidebar_layout.addWidget(plugin_sidebar_hint)
         self.plugin_sidebar_layout = QVBoxLayout()
         plugin_sidebar_layout.addLayout(self.plugin_sidebar_layout)
@@ -657,9 +653,10 @@ class Gta5PopulatorWindow(QMainWindow):
         root_layout.addWidget(splitter, 1)
 
         status_row = QWidget()
+        status_row.setObjectName("StatusStrip")
         status_row_layout = QHBoxLayout(status_row)
-        status_row_layout.setContentsMargins(0, 0, 0, 0)
-        status_row_layout.setSpacing(10)
+        status_row_layout.setContentsMargins(4, 2, 4, 2)
+        status_row_layout.setSpacing(6)
 
         self.status_label = QLabel()
         self.status_label.setObjectName("Status")
@@ -699,10 +696,12 @@ class Gta5PopulatorWindow(QMainWindow):
         buttons.setSpacing(8)
 
         self.add_folder_button = QPushButton("Add Folder")
+        self.add_folder_button.setObjectName("SecondaryButton")
         self.add_folder_button.clicked.connect(self.add_folder)
         buttons.addWidget(self.add_folder_button)
 
         self.remove_folder_button = QPushButton("Remove Selected")
+        self.remove_folder_button.setObjectName("SecondaryButton")
         self.remove_folder_button.clicked.connect(self.remove_folder)
         buttons.addWidget(self.remove_folder_button)
 
@@ -793,6 +792,7 @@ class Gta5PopulatorWindow(QMainWindow):
         details_layout.addLayout(self.detail_plugin_layout)
 
         self.toggle_button = QPushButton("Enable / Disable Bundle")
+        self.toggle_button.setObjectName("PrimaryButton")
         self.toggle_button.clicked.connect(self.toggle_current_bundle)
         details_layout.addWidget(self.toggle_button)
 
@@ -822,10 +822,12 @@ class Gta5PopulatorWindow(QMainWindow):
         buttons.setSpacing(8)
 
         self.disable_detected_button = QPushButton("Disable Selected")
+        self.disable_detected_button.setObjectName("SecondaryButton")
         self.disable_detected_button.clicked.connect(self.disable_detected_file)
         buttons.addWidget(self.disable_detected_button)
 
         self.ignore_detected_button = QPushButton("Ignore Selected")
+        self.ignore_detected_button.setObjectName("SecondaryButton")
         self.ignore_detected_button.clicked.connect(self.ignore_detected_file)
         buttons.addWidget(self.ignore_detected_button)
 
@@ -836,67 +838,179 @@ class Gta5PopulatorWindow(QMainWindow):
     def apply_theme(self):
         self.setStyleSheet(
             """
+            QWidget#AppRoot {
+                background-color: #000000;
+            }
+
             QWidget {
-                background: #000000;
-                color: #f4f4f4;
-                font-family: Segoe UI, Arial, sans-serif;
+                background-color: transparent;
+                color: #d0d0d0;
+                font-family: "Cascadia Mono", "Consolas", "JetBrains Mono", monospace;
                 font-size: 12px;
             }
 
             QMainWindow {
-                background: #000000;
+                background-color: #000000;
+            }
+
+            QMenuBar {
+                background-color: #000000;
+                color: #b0b0b0;
+                border-bottom: 1px solid #1a1a1a;
+                padding: 0;
+                spacing: 0;
+            }
+
+            QMenuBar::item {
+                padding: 4px 10px;
+                border-radius: 0;
+            }
+
+            QMenuBar::item:selected {
+                background-color: #111111;
+                color: #ffffff;
+            }
+
+            QMenu {
+                background-color: #000000;
+                border: 1px solid #333333;
+                border-radius: 0;
+                padding: 0;
+            }
+
+            QMenu::item {
+                padding: 6px 20px;
+            }
+
+            QMenu::item:selected {
+                background-color: #1a1a1a;
+                color: #ffffff;
+            }
+
+            QPushButton#CornerWarnButton {
+                background-color: #000000;
+                color: #ffb020;
+                border: 1px solid #ffb020;
+                border-radius: 0;
+                padding: 2px 8px;
+                font-weight: 700;
+                font-size: 11px;
+                min-height: 20px;
+                max-height: 22px;
+            }
+
+            QPushButton#CornerWarnButton:hover {
+                background-color: #331a00;
+                color: #ffd080;
+            }
+
+            QPushButton#CornerButton {
+                background-color: #000000;
+                color: #d0d0d0;
+                border: 1px solid #333333;
+                border-radius: 0;
+                padding: 2px 8px;
+                font-weight: 700;
+                font-size: 11px;
+                min-height: 20px;
+                max-height: 22px;
+            }
+
+            QPushButton#CornerButton:hover {
+                background-color: #111111;
+                color: #ffffff;
+            }
+
+            QToolBar {
+                background-color: #000000;
+                border: none;
+                border-bottom: 1px solid #1a1a1a;
+                spacing: 4px;
+                padding: 2px 4px;
+                min-height: 24px;
+            }
+
+            QToolButton,
+            QToolBar QToolButton {
+                background-color: #0a0a0a;
+                border: 1px solid #333333;
+                border-radius: 0;
+                color: #d0d0d0;
+                padding: 4px 8px;
             }
 
             QLabel#Title {
                 color: #ffffff;
-                font-size: 22px;
-                font-weight: 800;
+                font-size: 14px;
+                font-weight: 700;
                 letter-spacing: 0;
             }
 
             QLabel#Subtitle,
-            QLabel#Status,
             QLabel#BundleSummary,
             QLabel#PanelHint {
-                color: #a9a9a9;
+                color: #707070;
+                font-size: 11px;
+            }
+
+            QLabel#SectionLabel {
+                color: #909090;
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 1px;
             }
 
             QLabel#BundleTitle {
                 color: #ffffff;
-                font-size: 17px;
-                font-weight: 800;
+                font-size: 13px;
+                font-weight: 700;
+            }
+
+            QWidget#StatusStrip {
+                background-color: #000000;
+                border: none;
+                border-top: 1px solid #1a1a1a;
             }
 
             QLabel#Status {
-                padding: 2px;
+                color: #707070;
+                padding: 2px 0;
+                font-size: 11px;
             }
 
             QGroupBox {
                 border: 1px solid #222222;
-                border-radius: 8px;
-                margin-top: 14px;
-                padding: 13px 10px 10px 10px;
-                background: #050505;
+                border-radius: 0;
+                margin-top: 12px;
+                padding: 10px 8px 8px 8px;
+                background-color: #000000;
                 font-weight: 700;
+                color: #c0c0c0;
             }
 
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
+                left: 8px;
+                padding: 0 4px;
                 color: #ffffff;
             }
 
             QLineEdit,
             QListWidget,
             QComboBox {
-                background: #0a0a0a;
-                border: 1px solid #242424;
-                border-radius: 6px;
-                color: #ffffff;
-                padding: 7px;
-                selection-background-color: #ffffff;
-                selection-color: #000000;
+                background-color: #000000;
+                border: 1px solid #333333;
+                border-radius: 0;
+                color: #e8e8e8;
+                padding: 6px 8px;
+                selection-background-color: #303030;
+                selection-color: #ffffff;
+            }
+
+            QLineEdit:focus,
+            QListWidget:focus,
+            QComboBox:focus {
+                border: 1px solid #666666;
             }
 
             QLineEdit {
@@ -904,114 +1018,139 @@ class Gta5PopulatorWindow(QMainWindow):
             }
 
             QListWidget::item {
-                padding: 4px 8px;
-                border-radius: 4px;
+                padding: 4px 6px;
+                border-radius: 0;
+            }
+
+            QListWidget::item:hover {
+                background-color: #0d0d0d;
             }
 
             QListWidget#BundleList::item {
-                min-height: 24px;
+                min-height: 22px;
             }
 
             QListWidget#FileList::item,
             QListWidget#FolderList::item {
-                min-height: 22px;
+                min-height: 20px;
             }
 
             QListWidget::item:selected {
-                background: #ffffff;
-                color: #000000;
+                background-color: #1a1a1a;
+                color: #ffffff;
+                border: 1px solid #444444;
             }
 
             QComboBox::drop-down {
                 border: 0;
-                width: 28px;
+                width: 22px;
             }
 
             QComboBox QAbstractItemView {
-                background: #080808;
-                border: 1px solid #303030;
-                color: #ffffff;
-                selection-background-color: #ffffff;
-                selection-color: #000000;
+                background-color: #000000;
+                border: 1px solid #333333;
+                color: #e8e8e8;
+                selection-background-color: #303030;
+                selection-color: #ffffff;
                 outline: 0;
+                border-radius: 0;
+            }
+
+            QPushButton#PrimaryButton {
+                background-color: #1a1a1a;
+                border: 1px solid #555555;
+                border-radius: 0;
+                color: #ffffff;
+                font-weight: 700;
+                min-height: 28px;
+                padding: 6px 12px;
+            }
+
+            QPushButton#PrimaryButton:hover {
+                background-color: #2a2a2a;
+                border-color: #777777;
+            }
+
+            QPushButton#PrimaryButton:pressed {
+                background-color: #0a0a0a;
             }
 
             QPushButton {
-                background: #ffffff;
-                border: 1px solid #ffffff;
-                border-radius: 6px;
-                color: #000000;
+                background-color: #0a0a0a;
+                border: 1px solid #333333;
+                border-radius: 0;
+                color: #d0d0d0;
                 font-weight: 700;
-                min-height: 30px;
-                padding: 7px 12px;
+                min-height: 28px;
+                padding: 6px 12px;
             }
 
             QWidget#DetailsPane {
-                border-left: 1px solid #181818;
+                border-left: 1px solid #1a1a1a;
             }
 
             QPushButton#SecondaryButton {
-                background: #121212;
-                border-color: #303030;
-                color: #ffffff;
+                background-color: #000000;
+                border-color: #333333;
+                color: #b0b0b0;
             }
 
             QPushButton#SecondaryButton:hover {
-                background: #1f1f1f;
-                border-color: #474747;
+                background-color: #111111;
+                border-color: #555555;
+                color: #ffffff;
             }
 
             QPushButton:hover {
-                background: #dcdcdc;
-                border-color: #dcdcdc;
+                background-color: #141414;
+                border-color: #555555;
             }
 
             QPushButton:pressed {
-                background: #bdbdbd;
-                border-color: #bdbdbd;
+                background-color: #050505;
             }
 
             QPushButton:disabled {
-                background: #151515;
-                border-color: #242424;
-                color: #666666;
+                background-color: #000000;
+                border-color: #222222;
+                color: #444444;
             }
 
             QFrame#Divider {
                 color: #222222;
-                background: #222222;
+                background-color: #222222;
                 max-height: 1px;
             }
 
             QFrame#PluginReviewCard {
-                background: #0d0d0d;
-                border: 1px solid #3a3a3a;
-                border-radius: 10px;
-                padding: 14px;
+                background-color: #0a0a0a;
+                border: none;
+                border-bottom: 1px solid #ffb020;
             }
 
-            QLabel#PluginReviewTitle {
-                color: #ffffff;
-                font-size: 15px;
+            QLabel#PluginReviewBadge {
+                background-color: #000000;
+                color: #ffb020;
+                border: 1px solid #ffb020;
                 font-weight: 800;
             }
 
-            QLabel#PluginReviewDanger {
-                color: #ff6b6b;
-                font-weight: 800;
-            }
-
-            QLabel#PluginReviewPerms {
+            QLabel#PluginReviewStripText {
                 color: #c8c8c8;
+                font-size: 11px;
             }
 
             QWidget#PluginSidebar {
-                border-left: 1px solid #181818;
-                padding-left: 8px;
+                border-left: 1px solid #1a1a1a;
+                padding-left: 6px;
             }
 
             QSplitter::handle {
-                background: #111111;
+                background-color: #111111;
+            }
+
+            QSplitter::handle:hover {
+                background-color: #333333;
             }
             """
         )
@@ -1419,6 +1558,8 @@ class Gta5PopulatorWindow(QMainWindow):
 
 
 def main():
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     app.setApplicationName("GTA V Mod Manager")
 
