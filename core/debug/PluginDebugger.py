@@ -1,12 +1,19 @@
+import json
+from copy import deepcopy
 from pathlib import Path
 from pprint import pformat
 import sys
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QBrush
+from PyQt5.QtGui import QColor, QBrush, QGuiApplication
 from PyQt5.QtWidgets import (
+    QAction,
+    QApplication,
+    QAbstractItemView,
     QComboBox,
+    QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -17,11 +24,69 @@ from PyQt5.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEBUG_DIR = Path(__file__).resolve().parent
+DEBUG_CONFIG_PATH = DEBUG_DIR / "config.json"
+
+DEFAULT_DEBUG_UI_CONFIG = {
+    "scale": 0.78,
+    "dpi_cap": 1.25,
+    "use_dpi": True,
+    "window": {
+        "width_ratio": 0.82,
+        "height_ratio": 0.78,
+        "min_width": 820,
+        "min_height": 500,
+        "width_cap": 1480,
+        "height_cap": 960,
+    },
+    "layout": {
+        "root_margins": [3, 2, 3, 3],
+        "root_spacing": 3,
+        "detail_left_margin": 5,
+        "status_margins": [3, 1, 3, 1],
+    },
+    "splitters": {
+        "inner_center_fraction_of_open_w": 0.48,
+        "inner_list_of_iw": [0.24, 0.76],
+        "mod_center_fraction_of_open_w": 0.54,
+        "mod_main_of_mw": [0.67, 0.33],
+        "outer_output_ratio_of_open_w": 0.34,
+        "outer_gap_px": 8,
+        "inner_plugin_col_min": 180,
+        "inner_detail_col_min": 300,
+        "mod_main_min": 360,
+        "mod_coverage_min": 220,
+        "outer_output_min": 300,
+        "outer_main_min": 480,
+    },
+}
+
+
+def _deep_merge_defaults(base, overrides):
+    out = deepcopy(base)
+    for key, value in (overrides or {}).items():
+        if key in out and isinstance(out[key], dict) and isinstance(value, dict):
+            _deep_merge_defaults(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def load_plugin_debugger_config(path=None):
+    path = path or DEBUG_CONFIG_PATH
+    data = {}
+    try:
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    return _deep_merge_defaults(DEFAULT_DEBUG_UI_CONFIG, data)
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -52,34 +117,73 @@ class MockAppManager:
 
 
 class PluginDebuggerWindow(QMainWindow):
-    def __init__(self, plugin_folder="plugins", parent=None):
+    def __init__(self, plugin_folder="plugins", parent=None, config_path=None):
         super().__init__(parent)
         self.plugin_folder = plugin_folder
         self.plugin_manager = None
         self.mock_app = None
         self.plugins_by_row = []
+        self._config = load_plugin_debugger_config(config_path)
 
         self.setWindowTitle("Plugin Debugger")
-        self.resize(1120, 760)
-        self.setMinimumSize(920, 620)
+        wcfg = self._config.get("window", {})
+        min_w = int(wcfg.get("min_width", 820))
+        min_h = int(wcfg.get("min_height", 500))
+        self.setMinimumSize(min_w, min_h)
+        app_inst = QApplication.instance()
+        self._open_w = 1100
+        self._open_h = 720
+        if app_inst is not None:
+            desk = app_inst.desktop().availableGeometry()
+            wr = float(wcfg.get("width_ratio", 0.70))
+            hr = float(wcfg.get("height_ratio", 0.74))
+            w_cap = int(wcfg.get("width_cap", 1480))
+            h_cap = int(wcfg.get("height_cap", 960))
+            w = max(min_w, min(w_cap, int(desk.width() * wr)))
+            h = max(min_h, min(h_cap, int(desk.height() * hr)))
+            self._open_w, self._open_h = w, h
+            self.resize(w, h)
 
         self.build_ui()
         self.apply_theme()
         self.reload_plugins()
 
     def build_ui(self):
-        root = QWidget()
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        self.corner_reload = QPushButton("Reload")
+        self.corner_reload.setObjectName("CornerButton")
+        self.corner_reload.clicked.connect(self.reload_plugins)
 
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(8)
-        title = QLabel("Plugin Debugger")
-        title.setObjectName("Title")
+        self.corner_clear = QPushButton("Clear log")
+        self.corner_clear.setObjectName("CornerButton")
+        self.corner_clear.clicked.connect(self.clear_event_log)
+
+        root = QWidget()
+        root.setObjectName("AppRoot")
+        layout = QVBoxLayout(root)
+        lcm = self._config.get("layout", {}).get("root_margins", [3, 2, 3, 3])
+        layout.setContentsMargins(int(lcm[0]), int(lcm[1]), int(lcm[2]), int(lcm[3]))
+        layout.setSpacing(int(self._config.get("layout", {}).get("root_spacing", 3)))
+
+        head = QHBoxLayout()
+        ta = QVBoxLayout()
+        ta.setSpacing(0)
+        t = QLabel("PLUGIN DEBUGGER")
+        t.setObjectName("Title")
+        st = QLabel("mock hooks · events · registry")
+        st.setObjectName("Subtitle")
+        ta.addWidget(t)
+        ta.addWidget(st)
+        head.addLayout(ta, 1)
+        layout.addLayout(head)
+
+        tb = QToolBar()
+        tb.setMovable(False)
+        tb.setFloatable(False)
+        self.addToolBar(tb)
 
         self.hook_combo = QComboBox()
-        self.hook_combo.setMinimumWidth(200)
+        sc = self._ui_scale()
+        self.hook_combo.setMinimumWidth(max(160, int(160 * sc)))
         self.hook_combo.addItems(self.available_hooks())
         self.hook_combo.currentTextChanged.connect(self._on_hook_combo_changed)
 
@@ -89,198 +193,527 @@ class PluginDebuggerWindow(QMainWindow):
         self.extension_phase_combo.addItems(list(EXTENSION_PHASES))
 
         self.pipeline_combo = QComboBox()
-        self.pipeline_combo.setMinimumWidth(120)
+        self.pipeline_combo.setMinimumWidth(max(100, int(110 * sc)))
 
-        reload_button = QPushButton("Reload Plugins")
-        reload_button.clicked.connect(self.reload_plugins)
+        run_btn = QPushButton("Run mock")
+        run_btn.setObjectName("SecondaryButton")
+        run_btn.clicked.connect(self.run_mock_hook)
+        pipe_btn = QPushButton("Run pipeline")
+        pipe_btn.setObjectName("SecondaryButton")
+        pipe_btn.clicked.connect(self.run_bootstrap_pipeline_mock)
 
-        run_button = QPushButton("Run Mock Hook")
-        run_button.clicked.connect(self.run_mock_hook)
+        tb.addWidget(QLabel("Hook"))
+        tb.addWidget(self.hook_combo)
+        tb.addWidget(QLabel("ext"))
+        tb.addWidget(self.extension_area_combo)
+        tb.addWidget(self.extension_phase_combo)
+        tb.addWidget(QLabel("pipe"))
+        tb.addWidget(self.pipeline_combo)
+        tb.addSeparator()
+        tb.addWidget(run_btn)
+        tb.addWidget(pipe_btn)
 
-        run_pipeline_button = QPushButton("Run bootstrap pipeline")
-        run_pipeline_button.clicked.connect(self.run_bootstrap_pipeline_mock)
+        outer = QSplitter(Qt.Horizontal)
+        outer.setChildrenCollapsible(False)
 
-        clear_button = QPushButton("Clear Log")
-        clear_button.clicked.connect(self.clear_event_log)
+        mod_split = QSplitter(Qt.Horizontal)
+        mod_split.setChildrenCollapsible(False)
 
-        toolbar.addWidget(title)
-        toolbar.addStretch(1)
-        toolbar.addWidget(QLabel("Hook"))
-        toolbar.addWidget(self.hook_combo)
-        toolbar.addWidget(QLabel("ext area"))
-        toolbar.addWidget(self.extension_area_combo)
-        toolbar.addWidget(QLabel("ext phase"))
-        toolbar.addWidget(self.extension_phase_combo)
-        toolbar.addWidget(QLabel("pipeline"))
-        toolbar.addWidget(self.pipeline_combo)
-        toolbar.addWidget(run_button)
-        toolbar.addWidget(run_pipeline_button)
-        toolbar.addWidget(reload_button)
-        toolbar.addWidget(clear_button)
-        layout.addLayout(toolbar)
+        center = QWidget()
+        cl = QVBoxLayout(center)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(4)
 
-        self._on_hook_combo_changed(self.hook_combo.currentText())
+        inner = QSplitter(Qt.Horizontal)
+        inner.setChildrenCollapsible(False)
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(8)
-
-        left_layout.addWidget(QLabel("Plugins"))
+        list_wrap = QWidget()
+        ll = QVBoxLayout(list_wrap)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(4)
+        ll.addWidget(QLabel("Plugins"))
         self.plugin_list = QListWidget()
+        self.plugin_list.setObjectName("FolderList")
         self.plugin_list.currentRowChanged.connect(self.refresh_plugin_detail)
-        left_layout.addWidget(self.plugin_list, 1)
+        ll.addWidget(self.plugin_list, 1)
 
-        left_layout.addWidget(QLabel("Selected Plugin"))
+        detail_wrap = QWidget()
+        detail_wrap.setObjectName("DetailsPane")
+        dl = QVBoxLayout(detail_wrap)
+        dlm = int(self._config.get("layout", {}).get("detail_left_margin", 5))
+        dl.setContentsMargins(dlm, 0, 0, 0)
+        dl.setSpacing(4)
+        dl.addWidget(QLabel("Detail"))
         self.plugin_tabs = QTabWidget()
-
         self.plugin_overview = QTextEdit()
         self.plugin_overview.setObjectName("Inspector")
         self.plugin_overview.setReadOnly(True)
-
         self.plugin_data = QTextEdit()
         self.plugin_data.setObjectName("Inspector")
         self.plugin_data.setReadOnly(True)
-
         self.plugin_hooks_view = QListWidget()
         self.plugin_hooks_view.setObjectName("HookList")
-
         self.plugin_tabs.addTab(self.plugin_overview, "Overview")
         self.plugin_tabs.addTab(self.plugin_data, "Data")
         self.plugin_tabs.addTab(self.plugin_hooks_view, "Hooks")
-        left_layout.addWidget(self.plugin_tabs, 2)
+        dl.addWidget(self.plugin_tabs, 1)
 
-        self.tabs = QTabWidget()
+        inner.addWidget(list_wrap)
+        inner.addWidget(detail_wrap)
+        sp = self._config.get("splitters", {})
+        iw_frac = float(sp.get("inner_center_fraction_of_open_w", 0.48))
+        iw = max(520, int(self._open_w * iw_frac))
+        ir = sp.get("inner_list_of_iw", [0.24, 0.76])
+        ip_min = int(sp.get("inner_plugin_col_min", 180))
+        id_min = int(sp.get("inner_detail_col_min", 300))
+        inner.setSizes(
+            [
+                max(ip_min, int(iw * float(ir[0]))),
+                max(id_min, int(iw * float(ir[1]))),
+            ]
+        )
+        inner.setStretchFactor(0, 0)
+        inner.setStretchFactor(1, 1)
 
+        cl.addWidget(inner, 1)
+
+        ext = QWidget()
+        ext.setObjectName("PluginSidebar")
+        esl = QVBoxLayout(ext)
+        esl.setContentsMargins(0, 0, 0, 0)
+        esl.setSpacing(4)
+        sh = QLabel("Coverage")
+        sh.setObjectName("SectionLabel")
+        esl.addWidget(sh)
         self.hook_table = QTableWidget(0, 4)
         self.hook_table.setHorizontalHeaderLabels(["Hook", "Plugin", "Callback", "Layer"])
-        self.hook_table.horizontalHeader().setStretchLastSection(True)
-        self.tabs.addTab(self.hook_table, "Hooks")
+        self.hook_table.setWordWrap(True)
+        self.hook_table.setTextElideMode(Qt.ElideNone)
+        self.hook_table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.hook_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        hh = self.hook_table.horizontalHeader()
+        hh.setStretchLastSection(False)
+        hh.setMinimumSectionSize(72)
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.hook_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        esl.addWidget(self.hook_table, 1)
 
+        mod_split.addWidget(center)
+        mod_split.addWidget(ext)
+        mw_frac = float(sp.get("mod_center_fraction_of_open_w", 0.54))
+        mw = max(560, int(self._open_w * mw_frac))
+        mr = sp.get("mod_main_of_mw", [0.67, 0.33])
+        mm_min = int(sp.get("mod_main_min", 360))
+        mc_min = int(sp.get("mod_coverage_min", 220))
+        mod_split.setSizes(
+            [
+                max(mm_min, int(mw * float(mr[0]))),
+                max(mc_min, int(mw * float(mr[1]))),
+            ]
+        )
+        mod_split.setStretchFactor(0, 2)
+        mod_split.setStretchFactor(1, 1)
+
+        side = QWidget()
+        sl = QVBoxLayout(side)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(4)
+        out_box = QGroupBox("Output")
+        ol = QVBoxLayout(out_box)
+        self.tabs = QTabWidget()
         self.event_log = QTextEdit()
         self.event_log.setObjectName("Log")
         self.event_log.setReadOnly(True)
-        self.event_log.setLineWrapMode(QTextEdit.NoWrap)
-        self.tabs.addTab(self.event_log, "Live Events")
-
+        self.event_log.setLineWrapMode(QTextEdit.WidgetWidth)
         self.error_log = QTextEdit()
         self.error_log.setObjectName("Log")
         self.error_log.setReadOnly(True)
-        self.error_log.setLineWrapMode(QTextEdit.NoWrap)
-        self.tabs.addTab(self.error_log, "Errors")
-
+        self.error_log.setLineWrapMode(QTextEdit.WidgetWidth)
         self.context_view = QTextEdit()
         self.context_view.setObjectName("Log")
         self.context_view.setReadOnly(True)
-        self.context_view.setLineWrapMode(QTextEdit.NoWrap)
-        self.tabs.addTab(self.context_view, "Context")
-
+        self.context_view.setLineWrapMode(QTextEdit.WidgetWidth)
         self.debug_props = QTextEdit()
         self.debug_props.setObjectName("Log")
         self.debug_props.setReadOnly(True)
-        self.debug_props.setLineWrapMode(QTextEdit.NoWrap)
+        self.debug_props.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.tabs.addTab(self.event_log, "Events")
+        self.tabs.addTab(self.error_log, "Errors")
+        self.tabs.addTab(self.context_view, "Context")
         self.tabs.addTab(self.debug_props, "Runtime")
+        ol.addWidget(self.tabs)
+        sl.addWidget(out_box, 1)
 
-        splitter.addWidget(left)
-        splitter.addWidget(self.tabs)
-        splitter.setSizes([340, 780])
+        outer.addWidget(mod_split)
+        outer.addWidget(side)
+        ow = self._open_w
+        out_ratio = float(sp.get("outer_output_ratio_of_open_w", 0.36))
+        gap = int(sp.get("outer_gap_px", 8))
+        out_w = max(int(sp.get("outer_output_min", 300)), int(ow * out_ratio))
+        main_w = max(int(sp.get("outer_main_min", 480)), ow - out_w - gap)
+        outer.setSizes([main_w, out_w])
+        outer.setStretchFactor(0, 3)
+        outer.setStretchFactor(1, 2)
 
-        layout.addWidget(splitter, 1)
+        layout.addWidget(outer, 1)
+
+        status_row = QWidget()
+        status_row.setObjectName("StatusStrip")
+        srl = QHBoxLayout(status_row)
+        sm = self._config.get("layout", {}).get("status_margins", [3, 1, 3, 1])
+        srl.setContentsMargins(int(sm[0]), int(sm[1]), int(sm[2]), int(sm[3]))
+        self.debug_status_label = QLabel()
+        self.debug_status_label.setObjectName("Status")
+        srl.addWidget(self.debug_status_label, 1)
+        layout.addWidget(status_row)
+
         self.setCentralWidget(root)
+        self._build_debug_menubar()
+        self._on_hook_combo_changed(self.hook_combo.currentText())
         self._refresh_pipeline_combo()
 
+    def _build_debug_menubar(self):
+        bar = self.menuBar()
+        bar.setCornerWidget(self.corner_reload, Qt.TopLeftCorner)
+        bar.setCornerWidget(self.corner_clear, Qt.TopRightCorner)
+        exit_act = QAction("Exit", self)
+        exit_act.triggered.connect(self.close)
+        bar.addMenu("File").addAction(exit_act)
+
+    def _ui_scale(self):
+        cfg = self._config
+        user = float(cfg.get("scale", 0.78))
+        cap = float(cfg.get("dpi_cap", 1.25))
+        if cfg.get("use_dpi", True):
+            screen = QGuiApplication.primaryScreen()
+            dpi = screen.logicalDotsPerInchX() / 96.0 if screen else 1.0
+            base = min(dpi, cap)
+        else:
+            base = 1.0
+        s = base * user
+        return max(0.5, min(2.0, s))
+
     def apply_theme(self):
+        s = self._ui_scale()
+        px = lambda n: max(10, int(round(n * s)))
+        self._html_body_px = px(13)
+        self._ctx_pre_width = max(40, int(72 * s))
+        hb = px(13)
+        title_px = px(16)
+        sub_px = px(12)
+        sec_px = px(11)
+        stat_px = px(12)
+        corner_fs = px(12)
+        tab_pad_v, tab_pad_h = px(6), px(12)
+        hdr_pad = px(5)
+        dd_w = px(22)
         self.setStyleSheet(
             """
-            QWidget {
-                background: #000000;
-                color: #f2f2f2;
-                font-family: Segoe UI, Arial, sans-serif;
-                font-size: 12px;
-            }
-
-            QLabel#Title {
-                font-size: 21px;
-                font-weight: 800;
-            }
-
-            QListWidget,
-            QTableWidget,
-            QTextEdit,
-            QComboBox {
-                background: #090909;
-                border: 1px solid #252525;
-                border-radius: 6px;
+            QWidget#AppRoot {{
+                background-color: #000000;
+            }}
+            QWidget {{
+                background-color: transparent;
+                color: #d0d0d0;
+                font-family: "Cascadia Mono", "Consolas", "JetBrains Mono", monospace;
+                font-size: {hb}px;
+            }}
+            QMainWindow {{
+                background-color: #000000;
+            }}
+            QMenuBar {{
+                background-color: #000000;
+                color: #b0b0b0;
+                border-bottom: 1px solid #1a1a1a;
+                padding: 0;
+                spacing: 0;
+            }}
+            QMenuBar::item {{
+                padding: {mip_v}px {mip_h}px;
+                border-radius: 0;
+            }}
+            QMenuBar::item:selected {{
+                background-color: #111111;
                 color: #ffffff;
-                selection-background-color: #ffffff;
-                selection-color: #000000;
-            }
-
-            QTextEdit#Log,
-            QTextEdit#Inspector {
-                font-family: Consolas, Cascadia Mono, monospace;
-                font-size: 12px;
-            }
-
-            QListWidget::item {
-                padding: 8px;
-                border-radius: 5px;
-            }
-
-            QListWidget#HookList::item {
-                padding: 5px 8px;
-            }
-
-            QListWidget::item:selected {
-                background: #ffffff;
-                color: #000000;
-            }
-
-            QTabWidget::pane {
-                border: 1px solid #252525;
-                border-radius: 6px;
-            }
-
-            QTabBar::tab {
-                background: #111111;
-                color: #dcdcdc;
-                border: 1px solid #252525;
-                padding: 8px 14px;
-                margin-right: 3px;
-            }
-
-            QTabBar::tab:selected {
-                background: #ffffff;
-                color: #000000;
-            }
-
-            QHeaderView::section {
-                background: #151515;
+            }}
+            QMenu {{
+                background-color: #000000;
+                border: 1px solid #333333;
+                border-radius: 0;
+                padding: 0;
+            }}
+            QMenu::item {{
+                padding: {mitem_v}px {mitem_h}px;
+            }}
+            QMenu::item:selected {{
+                background-color: #1a1a1a;
                 color: #ffffff;
-                border: 1px solid #252525;
-                padding: 5px;
-            }
-
-            QPushButton {
-                background: #ffffff;
-                border: 1px solid #ffffff;
-                border-radius: 6px;
-                color: #000000;
+            }}
+            QPushButton#CornerButton {{
+                background-color: #000000;
+                color: #d0d0d0;
+                border: 1px solid #333333;
+                border-radius: 0;
+                padding: {cb_pad_v}px {cb_pad_h}px;
                 font-weight: 700;
-                min-height: 30px;
-                padding: 6px 12px;
-            }
-            """
+                font-size: {corner_fs}px;
+                min-height: {cb_min}px;
+                max-height: {cb_max}px;
+            }}
+            QPushButton#CornerButton:hover {{
+                background-color: #111111;
+                color: #ffffff;
+            }}
+            QToolBar {{
+                background-color: #000000;
+                border: none;
+                border-bottom: 1px solid #1a1a1a;
+                spacing: {tb_sp}px;
+                padding: {tb_pv}px {tb_ph}px;
+                min-height: {tb_mh}px;
+            }}
+            QLabel#Title {{
+                color: #ffffff;
+                font-size: {title_px}px;
+                font-weight: 700;
+            }}
+            QLabel#Subtitle,
+            QLabel#PanelHint {{
+                color: #707070;
+                font-size: {sub_px}px;
+            }}
+            QLabel#SectionLabel {{
+                color: #909090;
+                font-size: {sec_px}px;
+                font-weight: 700;
+                letter-spacing: 1px;
+            }}
+            QWidget#StatusStrip {{
+                background-color: #000000;
+                border: none;
+                border-top: 1px solid #1a1a1a;
+            }}
+            QLabel#Status {{
+                color: #707070;
+                padding: {st_pv}px 0;
+                font-size: {stat_px}px;
+            }}
+            QGroupBox {{
+                border: 1px solid #222222;
+                border-radius: 0;
+                margin-top: {gb_mt}px;
+                padding: {gb_pt}px {gb_pr}px {gb_pb}px {gb_pl}px;
+                background-color: #000000;
+                font-weight: 700;
+                color: #c0c0c0;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: {gb_tl}px;
+                padding: 0 {gb_tpad}px;
+                color: #ffffff;
+            }}
+            QLineEdit,
+            QListWidget,
+            QComboBox,
+            QTextEdit,
+            QTableWidget {{
+                background-color: #000000;
+                border: 1px solid #333333;
+                border-radius: 0;
+                color: #e8e8e8;
+                padding: {inp_pv}px {inp_ph}px;
+                selection-background-color: #303030;
+                selection-color: #ffffff;
+            }}
+            QTextEdit#Log,
+            QTextEdit#Inspector {{
+                padding: {log_pad}px;
+            }}
+            QListWidget::item {{
+                padding: {lw_iv}px {lw_ih}px;
+                border-radius: 0;
+            }}
+            QListWidget::item:hover {{
+                background-color: #0d0d0d;
+            }}
+            QListWidget::item:selected {{
+                background-color: #1a1a1a;
+                color: #ffffff;
+                border: 1px solid #444444;
+            }}
+            QComboBox::drop-down {{
+                border: 0;
+                width: {dd_w}px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: #000000;
+                border: 1px solid #333333;
+                color: #e8e8e8;
+                selection-background-color: #303030;
+                selection-color: #ffffff;
+                outline: 0;
+                border-radius: 0;
+            }}
+            QPushButton {{
+                background-color: #0a0a0a;
+                border: 1px solid #333333;
+                border-radius: 0;
+                color: #d0d0d0;
+                font-weight: 700;
+                min-height: {btn_mh}px;
+                padding: {btn_pv}px {btn_ph}px;
+            }}
+            QPushButton#SecondaryButton {{
+                background-color: #000000;
+                border-color: #333333;
+                color: #b0b0b0;
+            }}
+            QPushButton#SecondaryButton:hover {{
+                background-color: #111111;
+                border-color: #555555;
+                color: #ffffff;
+            }}
+            QPushButton:hover {{
+                background-color: #141414;
+                border-color: #555555;
+            }}
+            QWidget#DetailsPane {{
+                border-left: 1px solid #1a1a1a;
+            }}
+            QWidget#PluginSidebar {{
+                border-left: 1px solid #1a1a1a;
+                padding-left: {ps_pl}px;
+            }}
+            QTabWidget::pane {{
+                border: 1px solid #222222;
+                border-radius: 0;
+                top: -1px;
+            }}
+            QTabBar::tab {{
+                background: #000000;
+                color: #707070;
+                border: 1px solid #333333;
+                padding: {tab_pad_v}px {tab_pad_h}px;
+                margin-right: 2px;
+                border-bottom: none;
+                border-top-left-radius: 0;
+                border-top-right-radius: 0;
+            }}
+            QTabBar::tab:selected {{
+                background: #111111;
+                color: #ffffff;
+            }}
+            QHeaderView::section {{
+                background: #0a0a0a;
+                color: #c0c0c0;
+                border: 1px solid #333333;
+                padding: {hdr_pad}px;
+            }}
+            QTableWidget {{
+                gridline-color: #222222;
+            }}
+            QSplitter::handle {{
+                background-color: #111111;
+            }}
+            QSplitter::handle:hover {{
+                background-color: #333333;
+            }}
+            QSplitter::handle:horizontal {{
+                width: {spl_w}px;
+            }}
+            QScrollBar:vertical {{
+                border: none;
+                background: #0a0a0a;
+                width: {sb_w}px;
+                margin: 0;
+            }}
+            QScrollBar:horizontal {{
+                border: none;
+                background: #0a0a0a;
+                height: {sb_w}px;
+                margin: 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #383838;
+                min-height: {sb_min}px;
+                border-radius: {sb_r}px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: #383838;
+                min-width: {sb_min}px;
+                border-radius: {sb_r}px;
+            }}
+            QScrollBar::handle:vertical:hover,
+            QScrollBar::handle:horizontal:hover {{
+                background: #505050;
+            }}
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical,
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal {{
+                height: 0;
+                width: 0;
+            }}
+            """.format(
+                hb=hb,
+                mip_v=px(5),
+                mip_h=px(10),
+                mitem_v=px(6),
+                mitem_h=px(20),
+                cb_pad_v=px(2),
+                cb_pad_h=px(8),
+                corner_fs=corner_fs,
+                cb_min=px(20),
+                cb_max=px(26),
+                tb_sp=px(4),
+                tb_pv=px(2),
+                tb_ph=px(4),
+                tb_mh=px(24),
+                title_px=title_px,
+                sub_px=sub_px,
+                sec_px=sec_px,
+                st_pv=px(2),
+                stat_px=stat_px,
+                gb_mt=px(12),
+                gb_pt=px(10),
+                gb_pr=px(8),
+                gb_pb=px(8),
+                gb_pl=px(8),
+                gb_tl=px(8),
+                gb_tpad=px(4),
+                inp_pv=px(6),
+                inp_ph=px(8),
+                log_pad=px(6),
+                lw_iv=px(4),
+                lw_ih=px(6),
+                dd_w=dd_w,
+                btn_mh=px(28),
+                btn_pv=px(6),
+                btn_ph=px(12),
+                ps_pl=px(6),
+                tab_pad_v=tab_pad_v,
+                tab_pad_h=tab_pad_h,
+                hdr_pad=hdr_pad,
+                spl_w=max(4, px(5)),
+                sb_w=max(8, px(10)),
+                sb_min=max(28, px(32)),
+                sb_r=max(2, px(3)),
+            )
         )
 
     def refresh_debug_properties(self):
-        if not getattr(self, "debug_props", None) or not self.plugin_manager:
+        pm = self.plugin_manager
+        if getattr(self, "debug_status_label", None) and pm:
+            self.debug_status_label.setText(
+                f"{len(pm.plugins)} plugins | {len(pm.event_log)} events | {len(pm.errors)} errors"
+            )
+        if not getattr(self, "debug_props", None) or not pm:
             return
 
-        pm = self.plugin_manager
         ctx = pm.context or {}
         q = ctx.get("plugin_review_queue") or []
         perm = ctx.get("permission_pipeline_last") or {}
@@ -435,10 +868,11 @@ class PluginDebuggerWindow(QMainWindow):
             self.format_mapping(getattr(plugin, "aliases", {}) or {}),
         ]
 
-        html = """
+        hp = getattr(self, "_html_body_px", 13)
+        html = f"""
         <div style="
             font-family: Consolas;
-            font-size: 12px;
+            font-size: {hp}px;
             color: white;
         ">
         """
@@ -582,7 +1016,7 @@ class PluginDebuggerWindow(QMainWindow):
                 self.apply_hook_table_color(item, values[3])
                 self.hook_table.setItem(row, column, item)
 
-        self.hook_table.resizeColumnsToContents()
+        self.hook_table.resizeRowsToContents()
 
     def hook_layer(self, callback_name):
         for suffix in ("_hook", "_process", "_core", "_internal"):
@@ -632,7 +1066,7 @@ class PluginDebuggerWindow(QMainWindow):
             lines.append(f'<span style="color:#ffd56f">Plugin:</span> {self.escape_html(error.get("plugin", ""))}')
             lines.append(f'<span style="color:#ffd56f">Hook:</span> {self.escape_html(error.get("hook", ""))}')
             lines.append(f'<span style="color:#ffd56f">Message:</span> {self.escape_html(error.get("error", ""))}')
-            lines.append(f'<pre style="color:#ff9f80">{self.escape_html(error.get("traceback", ""))}</pre>')
+            lines.append(f'<pre style="color:#ff9f80; white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere">{self.escape_html(error.get("traceback", ""))}</pre>')
 
         self.error_log.setHtml("<br>".join(lines))
 
@@ -671,11 +1105,13 @@ class PluginDebuggerWindow(QMainWindow):
             )
             return
 
+        hp = getattr(self, "_html_body_px", 13)
+        cw = getattr(self, "_ctx_pre_width", 72)
         html = [
-            """
+            f"""
             <div style="
                 font-family:Consolas;
-                font-size:12px;
+                font-size:{hp}px;
                 color:white;
             ">
             """
@@ -697,7 +1133,7 @@ class PluginDebuggerWindow(QMainWindow):
                 color = colors["value"]
 
             formatted = self.escape_html(
-                pformat(value, width=90)
+                pformat(value, width=cw)
             )
 
             html.append(
@@ -713,6 +1149,9 @@ class PluginDebuggerWindow(QMainWindow):
                     <pre style="
                         margin:4px 0 0 12px;
                         color:{color};
+                        white-space:pre-wrap;
+                        word-break:break-word;
+                        overflow-wrap:anywhere;
                     ">
     {formatted}
                     </pre>
@@ -861,8 +1300,11 @@ class PluginDebuggerWindow(QMainWindow):
 
 
 def main():
+    from PyQt5.QtCore import Qt as QtCoreQt
     from PyQt5.QtWidgets import QApplication
 
+    QApplication.setAttribute(QtCoreQt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(QtCoreQt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     window = PluginDebuggerWindow()
     window.show()
