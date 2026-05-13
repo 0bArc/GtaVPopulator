@@ -12,6 +12,7 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QListView
 from PyQt5.QtWidgets import (
     QApplication,
+    QAction,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -22,9 +23,11 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSplitter,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -37,13 +40,21 @@ CONFIG_FILE = "gta5populator_config.json"
 
 class Gta5Populator:
     def __init__(self):
-        self.plugin_manager = PluginManager()
         self.paths = []
-        self.categories = self.empty_categories()
+        self.reviewed_plugin_paths = set()
         self.known_files = set()
         self.detected_files = []
 
-        self.load_config()
+        payload = self._load_config_payload()
+        if payload is not None:
+            self._apply_config_payload(payload, hook=False)
+
+        self.plugin_manager = PluginManager(reviewed_plugin_paths=self.reviewed_plugin_paths)
+
+        if payload is not None:
+            self.plugin_manager.hook("on_config_loaded", self, payload)
+
+        self.categories = self.empty_categories()
         self.scan_files(initial=True)
         self.plugin_manager.hook("on_app_start", self)
 
@@ -63,26 +74,37 @@ class Gta5Populator:
     # CONFIG
     # =====================================================
 
-    def load_config(self):
+    def _load_config_payload(self):
         if not Path(CONFIG_FILE).exists():
-            return
+            return None
 
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                return json.load(f)
+        except Exception:
+            return None
 
-            self.paths = [Path(x) for x in data.get("paths", [])]
-            self.known_files = set(data.get("known_files", []))
+    def _apply_config_payload(self, data, hook=True):
+        self.paths = [Path(x) for x in data.get("paths", [])]
+        self.known_files = set(data.get("known_files", []))
+        self.reviewed_plugin_paths.clear()
+        self.reviewed_plugin_paths.update(data.get("reviewed_plugin_paths", []))
+        if hook and getattr(self, "plugin_manager", None):
             self.plugin_manager.hook("on_config_loaded", self, data)
 
-        except Exception:
-            self.paths = []
-            self.known_files = set()
+    def load_config(self):
+        payload = self._load_config_payload()
+
+        if payload is None:
+            return
+
+        self._apply_config_payload(payload, hook=True)
 
     def save_config(self):
         data = {
             "paths": [str(x) for x in self.paths],
             "known_files": sorted(self.known_files),
+            "reviewed_plugin_paths": sorted(self.reviewed_plugin_paths),
         }
         self.plugin_manager.hook("on_config_saving", self, data)
 
@@ -287,6 +309,15 @@ class Gta5PopulatorWindow(QMainWindow):
         self.current_bundles = []
         self.filtered_bundles = []
         self.plugin_debugger = None
+        self._plugin_ui_refs = {
+            "toolbar_actions": [],
+            "menu_actions": [],
+            "sidebar_widgets": [],
+            "status_widgets": [],
+            "detail_widgets": [],
+        }
+        self._plugin_context_bundle = []
+        self._plugin_context_file = []
 
         self.setWindowTitle("GTA V Mod Manager")
         self.resize(1060, 780)
@@ -296,6 +327,256 @@ class Gta5PopulatorWindow(QMainWindow):
         self.apply_theme()
         self.refresh_ui()
         self.manager.plugin_manager.hook("on_ui_ready", self.manager, self)
+        self._apply_plugin_ui_slots()
+        self._present_plugin_review_queue()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout_plugin_review_card()
+
+    def _layout_plugin_review_card(self):
+        if not hasattr(self, "_plugin_review_card"):
+            return
+
+        root = getattr(self, "_root_layout_widget", None)
+
+        if not root or not self._plugin_review_card.isVisible():
+            return
+
+        margin = 18
+        card_w = min(440, max(280, root.width() - margin * 2))
+        card_h = min(260, max(160, root.height() // 3))
+        x = (root.width() - card_w) // 2
+        y = (root.height() - card_h) // 2
+        self._plugin_review_card.setGeometry(x, y, card_w, card_h)
+
+    def _build_plugin_menubar(self):
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("File")
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        self._plugin_menu = menu_bar.addMenu("Plugins")
+
+    def _clear_plugin_ui_contributions(self):
+        for action in self._plugin_ui_refs["toolbar_actions"]:
+            self.plugin_toolbar.removeAction(action)
+
+        for action in self._plugin_ui_refs["menu_actions"]:
+            self._plugin_menu.removeAction(action)
+
+        while self.plugin_sidebar_layout.count():
+            item = self.plugin_sidebar_layout.takeAt(0)
+            widget = item.widget()
+
+            if widget:
+                widget.deleteLater()
+
+        while self.plugin_status_row.count():
+            item = self.plugin_status_row.takeAt(0)
+            widget = item.widget()
+
+            if widget:
+                widget.deleteLater()
+
+        while self.detail_plugin_layout.count():
+            item = self.detail_plugin_layout.takeAt(0)
+            widget = item.widget()
+
+            if widget:
+                widget.deleteLater()
+
+        self._plugin_ui_refs = {
+            "toolbar_actions": [],
+            "menu_actions": [],
+            "sidebar_widgets": [],
+            "status_widgets": [],
+            "detail_widgets": [],
+        }
+        self._plugin_context_bundle = []
+        self._plugin_context_file = []
+
+    def _apply_plugin_ui_slots(self):
+        self._clear_plugin_ui_contributions()
+        pm = self.manager.plugin_manager
+
+        for item in pm.run_ui_render_pipeline(self.manager, self, "toolbar", {}):
+            if not isinstance(item, dict):
+                continue
+
+            if item.get("type") != "action":
+                continue
+
+            action = QAction(str(item.get("text", "Plugin")), self)
+            callback = item.get("callback")
+
+            if callable(callback):
+                action.triggered.connect(callback)
+
+            self.plugin_toolbar.addAction(action)
+            self._plugin_ui_refs["toolbar_actions"].append(action)
+
+        for item in pm.run_ui_render_pipeline(self.manager, self, "menu", {}):
+            if not isinstance(item, dict):
+                continue
+
+            if item.get("type") != "action":
+                continue
+
+            action = QAction(str(item.get("text", "Item")), self)
+            callback = item.get("callback")
+
+            if callable(callback):
+                action.triggered.connect(callback)
+
+            self._plugin_menu.addAction(action)
+            self._plugin_ui_refs["menu_actions"].append(action)
+
+        for item in pm.run_ui_render_pipeline(self.manager, self, "sidebar", {}):
+            widget = item.get("widget") if isinstance(item, dict) else item
+
+            if isinstance(widget, QWidget):
+                self.plugin_sidebar_layout.addWidget(widget)
+                self._plugin_ui_refs["sidebar_widgets"].append(widget)
+
+        for item in pm.run_ui_render_pipeline(self.manager, self, "status_widget", {}):
+            widget = item.get("widget") if isinstance(item, dict) else item
+
+            if isinstance(widget, QWidget):
+                self.plugin_status_row.addWidget(widget)
+                self._plugin_ui_refs["status_widgets"].append(widget)
+
+        for item in pm.run_ui_render_pipeline(self.manager, self, "detail", {}):
+            widget = item.get("widget") if isinstance(item, dict) else item
+
+            if isinstance(widget, QWidget):
+                self.detail_plugin_layout.addWidget(widget)
+                self._plugin_ui_refs["detail_widgets"].append(widget)
+
+        for item in pm.run_ui_render_pipeline(self.manager, self, "context_action", {}):
+            if not isinstance(item, dict):
+                continue
+
+            target = item.get("target", "bundle")
+
+            if target == "file":
+                self._plugin_context_file.append(item)
+            else:
+                self._plugin_context_bundle.append(item)
+
+    def _open_bundle_context_menu(self, pos):
+        menu = QMenu(self)
+        bundle = self.current_bundle()
+
+        for item in self._plugin_context_bundle:
+            if not isinstance(item, dict) or item.get("type") != "action":
+                continue
+
+            label = str(item.get("text", "Action"))
+            act = QAction(label, self)
+            callback = item.get("callback")
+
+            if callable(callback):
+                act.triggered.connect(lambda checked=False, cb=callback, b=bundle: cb(b))
+
+            menu.addAction(act)
+
+        if menu.actions():
+            menu.exec_(self.bundle_list.mapToGlobal(pos))
+
+    def _open_file_context_menu(self, pos):
+        menu = QMenu(self)
+        row = self.file_list.itemAt(pos)
+
+        if not row:
+            return
+
+        file_data = row.data(Qt.UserRole)
+
+        for item in self._plugin_context_file:
+            if not isinstance(item, dict) or item.get("type") != "action":
+                continue
+
+            label = str(item.get("text", "Action"))
+            act = QAction(label, self)
+            callback = item.get("callback")
+
+            if callable(callback):
+                act.triggered.connect(
+                    lambda checked=False, cb=callback, fd=file_data: cb(fd)
+                )
+
+            menu.addAction(act)
+
+        if menu.actions():
+            menu.exec_(self.file_list.mapToGlobal(pos))
+
+    def _present_plugin_review_queue(self):
+        queue = self.manager.plugin_manager.context.get("plugin_review_queue") or []
+
+        if not queue:
+            self._plugin_review_card.hide()
+            return
+
+        self._fill_plugin_review_card(queue[0])
+        self._plugin_review_card.show()
+        self._layout_plugin_review_card()
+
+    def _fill_plugin_review_card(self, entry):
+        existing = self._plugin_review_card.layout()
+
+        if existing:
+            QWidget().setLayout(existing)
+
+        layout = QVBoxLayout(self._plugin_review_card)
+        layout.setSpacing(8)
+
+        title = QLabel("New plugin")
+        title.setObjectName("PluginReviewTitle")
+        title.setText(f"New plugin: {entry.get('plugin_name', 'Unknown')}")
+
+        perms = entry.get("report", {}).get("permissions") or []
+        perm_text = ", ".join(perms) if perms else "No special capability markers detected"
+
+        body = QLabel(perm_text)
+        body.setObjectName("PluginReviewPerms")
+        body.setWordWrap(True)
+
+        danger = entry.get("report", {}).get("dangerous")
+        risk = QLabel(
+            "Flagged as potentially dangerous (dynamic exec / subprocess / etc.)."
+            if danger
+            else "Not flagged as high-risk by static scan."
+        )
+        risk.setObjectName("PluginReviewDanger" if danger else "PanelHint")
+        risk.setWordWrap(True)
+
+        path_label = QLabel(entry.get("file", ""))
+        path_label.setObjectName("PanelHint")
+        path_label.setWordWrap(True)
+
+        buttons = QHBoxLayout()
+        ok = QPushButton("Got it")
+        ok.clicked.connect(lambda: self._ack_plugin_review(entry.get("path")))
+        buttons.addStretch(1)
+        buttons.addWidget(ok)
+
+        layout.addWidget(title)
+        layout.addWidget(body)
+        layout.addWidget(risk)
+        layout.addWidget(path_label)
+        layout.addLayout(buttons)
+
+    def _ack_plugin_review(self, path):
+        if path:
+            self.manager.reviewed_plugin_paths.add(path)
+            self.manager.save_config()
+
+        queue = self.manager.plugin_manager.context.setdefault("plugin_review_queue", [])
+        self.manager.plugin_manager.context["plugin_review_queue"] = [
+            item for item in queue if item.get("path") != path
+        ]
+        self._present_plugin_review_queue()
 
     def build_ui(self):
         root = QWidget()
@@ -332,10 +613,35 @@ class Gta5PopulatorWindow(QMainWindow):
 
         root_layout.addLayout(header)
 
+        self.plugin_toolbar = QToolBar("Plugin actions")
+        self.plugin_toolbar.setMovable(False)
+        self.plugin_toolbar.setFloatable(False)
+        self.addToolBar(self.plugin_toolbar)
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
 
         mod_panel = self.create_mod_panel()
+
+        plugin_sidebar = QWidget()
+        plugin_sidebar.setObjectName("PluginSidebar")
+        plugin_sidebar.setMinimumWidth(0)
+        plugin_sidebar_layout = QVBoxLayout(plugin_sidebar)
+        plugin_sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        plugin_sidebar_layout.setSpacing(6)
+        plugin_sidebar_hint = QLabel("Plugin sidebar")
+        plugin_sidebar_hint.setObjectName("PanelHint")
+        plugin_sidebar_layout.addWidget(plugin_sidebar_hint)
+        self.plugin_sidebar_layout = QVBoxLayout()
+        plugin_sidebar_layout.addLayout(self.plugin_sidebar_layout)
+        plugin_sidebar_layout.addStretch(1)
+
+        mod_split = QSplitter(Qt.Horizontal)
+        mod_split.setChildrenCollapsible(False)
+        mod_split.addWidget(mod_panel)
+        mod_split.addWidget(plugin_sidebar)
+        mod_split.setSizes([700, 180])
+
         side_panel = QWidget()
         side_layout = QVBoxLayout(side_panel)
         side_layout.setContentsMargins(0, 0, 0, 0)
@@ -343,17 +649,40 @@ class Gta5PopulatorWindow(QMainWindow):
         side_layout.addWidget(self.create_folder_panel(), 1)
         side_layout.addWidget(self.create_detect_panel(), 1)
 
-        splitter.addWidget(mod_panel)
+        splitter.addWidget(mod_split)
         splitter.addWidget(side_panel)
-        splitter.setSizes([780, 260])
+        splitter.setSizes([920, 260])
 
         root_layout.addWidget(splitter, 1)
 
+        status_row = QWidget()
+        status_row_layout = QHBoxLayout(status_row)
+        status_row_layout.setContentsMargins(0, 0, 0, 0)
+        status_row_layout.setSpacing(10)
+
         self.status_label = QLabel()
         self.status_label.setObjectName("Status")
-        root_layout.addWidget(self.status_label)
+
+        self.plugin_status_host = QWidget()
+        self.plugin_status_row = QHBoxLayout(self.plugin_status_host)
+        self.plugin_status_row.setContentsMargins(0, 0, 0, 0)
+        self.plugin_status_row.setSpacing(6)
+
+        status_row_layout.addWidget(self.status_label, 1)
+        status_row_layout.addWidget(self.plugin_status_host, 0)
+
+        root_layout.addWidget(status_row)
 
         self.setCentralWidget(root)
+
+        self._build_plugin_menubar()
+
+        self._plugin_review_card = QFrame(root)
+        self._plugin_review_card.setObjectName("PluginReviewCard")
+        self._plugin_review_card.hide()
+        self._plugin_review_card.raise_()
+
+        self._root_layout_widget = root
 
     def create_folder_panel(self):
         panel = QGroupBox("Folders")
@@ -422,6 +751,8 @@ class Gta5PopulatorWindow(QMainWindow):
         self.bundle_list.setBatchSize(40)
         self.bundle_list.currentItemChanged.connect(self.on_bundle_selected)
         self.bundle_list.itemDoubleClicked.connect(self.on_bundle_double_clicked)
+        self.bundle_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.bundle_list.customContextMenuRequested.connect(self._open_bundle_context_menu)
         browser_layout.addWidget(self.bundle_list, 1)
 
         details = QWidget()
@@ -453,7 +784,12 @@ class Gta5PopulatorWindow(QMainWindow):
         self.file_list.setObjectName("FileList")
         self.file_list.setUniformItemSizes(True)
         self.file_list.itemDoubleClicked.connect(self.on_file_double_clicked)
+        self.file_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.file_list.customContextMenuRequested.connect(self._open_file_context_menu)
         details_layout.addWidget(self.file_list, 1)
+
+        self.detail_plugin_layout = QVBoxLayout()
+        details_layout.addLayout(self.detail_plugin_layout)
 
         self.toggle_button = QPushButton("Enable / Disable Bundle")
         self.toggle_button.clicked.connect(self.toggle_current_bundle)
@@ -644,6 +980,33 @@ class Gta5PopulatorWindow(QMainWindow):
                 color: #222222;
                 background: #222222;
                 max-height: 1px;
+            }
+
+            QFrame#PluginReviewCard {
+                background: #0d0d0d;
+                border: 1px solid #3a3a3a;
+                border-radius: 10px;
+                padding: 14px;
+            }
+
+            QLabel#PluginReviewTitle {
+                color: #ffffff;
+                font-size: 15px;
+                font-weight: 800;
+            }
+
+            QLabel#PluginReviewDanger {
+                color: #ff6b6b;
+                font-weight: 800;
+            }
+
+            QLabel#PluginReviewPerms {
+                color: #c8c8c8;
+            }
+
+            QWidget#PluginSidebar {
+                border-left: 1px solid #181818;
+                padding-left: 8px;
             }
 
             QSplitter::handle {

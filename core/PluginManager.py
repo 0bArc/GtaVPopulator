@@ -4,6 +4,8 @@ import traceback
 from pathlib import Path
 from collections import defaultdict
 
+from core.plugin_permissions import analyze_python_plugin_source
+
 
 class Helper:
     """
@@ -178,7 +180,13 @@ class PluginBase:
 
     def format_status(self, manager, default_text):
         return None
-    
+
+    def bootstrap_pipeline_hook(self, plugin_manager, pipeline_name, state):
+        return None
+
+    def ui_render_hook(self, manager, window, slot, context):
+        return None
+
     def get_bundle_info(self, manager, bundle):
         return None
 
@@ -322,7 +330,7 @@ Helper.plugin(BuiltInGtaPlugin)
 
 
 class PluginManager:
-    def __init__(self, plugin_folder="plugins"):
+    def __init__(self, plugin_folder="plugins", reviewed_plugin_paths=None):
         self.plugin_folder = Path(plugin_folder)
         self.bootstrap_folder = self.plugin_folder / "bootstrap"
         self.plugins = []
@@ -332,6 +340,9 @@ class PluginManager:
         self.loaded_files = set()
         self._loaded_modules = set()
         self._executed_hooks = set()
+        self.reviewed_plugin_paths = reviewed_plugin_paths
+        if self.reviewed_plugin_paths is None:
+            self.reviewed_plugin_paths = set()
         self.bootstrap()
         self.register(BuiltInGtaPlugin())
         self.load_plugins()
@@ -344,6 +355,7 @@ class PluginManager:
         for plugin_file in self.bootstrap_files():
             self.load_plugin_file(plugin_file, bootstrap=True)
 
+        self.run_bootstrap_pipeline("permission", {"stage": "bootstrap", "reports": []})
         self.hook("plugin_manager_bootstrap", self)
         self.log_event("BOOTSTRAP_DONE", "Bootstrap complete")
 
@@ -392,6 +404,7 @@ class PluginManager:
             self.load_plugin_file(plugin_file)
 
         self.hook("after_plugins_loaded", self)
+        self.run_bootstrap_pipeline("permission", {"stage": "after_load", "reports": []})
         self.log_event("PLUGIN_LOAD_DONE", "Plugin loading complete")
 
     def bootstrap_files(self):
@@ -495,6 +508,27 @@ class PluginManager:
             if plugin is not None:
                 setattr(plugin, "__plugin_file__", str(plugin_file))
                 setattr(plugin, "__plugin_bootstrap__", bootstrap)
+
+                if not bootstrap:
+                    report = analyze_python_plugin_source(plugin_file)
+                    setattr(plugin, "__plugin_permission_report__", report)
+                    key = str(plugin_file.resolve())
+                    perms = report.get("permissions") or []
+                    interesting = bool(report.get("dangerous")) or bool(perms)
+
+                    if interesting and key not in self.reviewed_plugin_paths:
+                        queue = self.context.setdefault("plugin_review_queue", [])
+                        if not any(entry.get("path") == key for entry in queue):
+                            queue.append(
+                                {
+                                    "path": key,
+                                    "file": str(plugin_file),
+                                    "plugin_name": getattr(
+                                        plugin, "name", plugin.__class__.__name__
+                                    ),
+                                    "report": report,
+                                }
+                            )
 
             self.log_event(
                 "PLUGIN_FILE_LOADED",
@@ -675,3 +709,53 @@ class PluginManager:
             aliases.update(getattr(plugin, "aliases", {}) or {})
 
         return aliases
+
+    def run_bootstrap_pipeline(self, pipeline_name, initial_state=None):
+        state = initial_state
+        prefix = f"bootstrap_pipeline_{pipeline_name}"
+
+        for plugin in self.plugins:
+            for callback_name in self.callback_names(prefix):
+                result = self.call_plugin(plugin, callback_name, self, state)
+
+                if result is not None:
+                    state = result
+
+        self.log_event(
+            "BOOTSTRAP_PIPELINE_DONE",
+            prefix,
+            pipeline=pipeline_name,
+        )
+        return state
+
+    def run_ui_render_pipeline(self, manager, window, slot, context=None):
+        allowed = {
+            "toolbar",
+            "menu",
+            "sidebar",
+            "context_action",
+            "status_widget",
+            "detail",
+        }
+
+        if slot not in allowed:
+            raise ValueError(f"Unknown ui_render slot: {slot}")
+
+        ctx = dict(context or {})
+        collected = []
+
+        for plugin in self.plugins:
+            for callback_name in self.callback_names("ui_render"):
+                result = self.call_plugin(
+                    plugin, callback_name, manager, window, slot, ctx
+                )
+
+                if not result:
+                    continue
+
+                if isinstance(result, (list, tuple)):
+                    collected.extend(result)
+                else:
+                    collected.append(result)
+
+        return collected
