@@ -984,9 +984,18 @@ class Gta5PopulatorWindow(QMainWindow):
 
     def open_plugin_debugger(self):
         from core.debug.PluginDebugger import PluginDebuggerWindow
+        from PyQt5.QtCore import Qt
 
         if self.plugin_debugger is None:
             self.plugin_debugger = PluginDebuggerWindow(parent=self)
+
+            self.plugin_debugger.setAttribute(Qt.WA_DeleteOnClose)
+
+            self.plugin_debugger.destroyed.connect(
+                lambda: setattr(self, "plugin_debugger", None)
+            )
+
+            self.plugin_debugger.setWindowFlag(Qt.Tool, True)
 
         self.plugin_debugger.show()
         self.plugin_debugger.raise_()
