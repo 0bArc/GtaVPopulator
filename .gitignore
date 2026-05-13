@@ -30,3 +30,6 @@ Scripts/
 
 # Logs
 *.log
+
+
+.agents/
