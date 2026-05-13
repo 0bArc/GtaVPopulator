@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# VSCode
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build/cache
+dist/
+build/
+*.spec
+
+# Runtime config
+gta5populator_config.json
+
+# User content
+BaseGame/
+Scripts/
+
+# Logs
+*.log
