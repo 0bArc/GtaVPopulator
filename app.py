@@ -31,7 +31,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
+from PyQt5.QtCore import QTimer
 from core.PluginManager import PluginManager
 
 
@@ -327,7 +327,7 @@ class Gta5PopulatorWindow(QMainWindow):
         self.refresh_ui()
         self.manager.plugin_manager.hook("on_ui_ready", self.manager, self)
         self._apply_plugin_ui_slots()
-        self._present_plugin_review_queue()
+        QTimer.singleShot(0, self._present_plugin_review_queue)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -349,8 +349,20 @@ class Gta5PopulatorWindow(QMainWindow):
         if not root or not self._plugin_review_card.isVisible():
             return
 
-        strip_h = 52
-        self._plugin_review_card.setGeometry(0, 0, root.width(), strip_h)
+        width = 520
+        height = 90
+
+        x = (root.width() - width) // 2
+        y = (root.height() - height) // 2
+
+        self._plugin_review_card.setGeometry(
+            x,
+            y,
+            width,
+            height,
+        )
+
+        self._plugin_review_card.raise_()
 
     def _build_plugin_menubar(self):
         menu_bar = self.menuBar()
@@ -533,47 +545,82 @@ class Gta5PopulatorWindow(QMainWindow):
         if existing:
             QWidget().setLayout(existing)
 
-        main = QHBoxLayout(self._plugin_review_card)
-        main.setContentsMargins(8, 4, 8, 4)
-        main.setSpacing(8)
+        report = entry.get("report", {})
 
-        badge = QLabel("!")
-        badge.setObjectName("PluginReviewBadge")
-        badge.setFixedWidth(22)
-        badge.setAlignment(Qt.AlignCenter)
-
-        perms = entry.get("report", {}).get("permissions") or []
+        perms = report.get("permissions") or []
         perm_text = ", ".join(perms) if perms else "no markers"
-        danger = entry.get("report", {}).get("dangerous")
-        tag = "DANGER " if danger else ""
 
-        summary = QLabel(
-            f"{tag}{entry.get('plugin_name', '?')}  |  {perm_text}  |  {entry.get('file', '')}"
+        score = report.get("score", 0)
+        danger = report.get("dangerous")
+
+        title_text = entry.get("plugin_name", "?")
+        file_text = entry.get("file", "")
+
+        main = QHBoxLayout(self._plugin_review_card)
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(12)
+
+        card = QFrame()
+        card.setObjectName("PluginReviewInner")
+
+        root_w = max(1, self.width())
+
+        card_width = max(420, min(760, int(root_w * 0.42)))
+
+        card.setMinimumHeight(120)
+        card.setMaximumWidth(card_width)
+
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(10)
+
+        if danger:
+            badge = QLabel("DANGER")
+            badge.setObjectName("PluginReviewBadge")
+            badge.setAlignment(Qt.AlignCenter)
+            badge.setFixedWidth(90)
+            card_layout.addWidget(badge, 0, Qt.AlignLeft)
+
+        title = QLabel(title_text)
+        title.setObjectName("PluginReviewTitle")
+        title.setWordWrap(True)
+
+        meta = QLabel(
+            f"score {score}  |  permissions: {perm_text}"
         )
-        summary.setObjectName("PluginReviewStripText")
-        summary.setWordWrap(True)
-        summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        meta.setObjectName("PluginReviewMeta")
+        meta.setWordWrap(True)
+
+        path = QLabel(file_text)
+        path.setObjectName("PluginReviewPath")
+        path.setWordWrap(True)
+
+        card_layout.addWidget(title)
+        card_layout.addWidget(meta)
+        card_layout.addWidget(path)
 
         ok = QPushButton("OK")
         ok.setObjectName("CornerButton")
-        ok.setFixedHeight(22)
+        ok.setFixedSize(64, 28)
+
         path_key = entry.get("path")
-        ok.clicked.connect(lambda checked=False, p=path_key: self._ack_plugin_review(p))
 
-        main.addWidget(badge, 0)
-        main.addWidget(summary, 1)
-        main.addWidget(ok, 0)
+        ok.clicked.connect(
+            lambda checked=False, p=path_key:
+            self._ack_plugin_review(p)
+        )
 
-    def _ack_plugin_review(self, path):
-        if path:
-            self.manager.reviewed_plugin_paths.add(path)
-            self.manager.save_config()
+        button_layout = QVBoxLayout()
+        button_layout.setContentsMargins(0, 0, 0, 0)
 
-        queue = self.manager.plugin_manager.context.setdefault("plugin_review_queue", [])
-        self.manager.plugin_manager.context["plugin_review_queue"] = [
-            item for item in queue if item.get("path") != path
-        ]
-        self._present_plugin_review_queue()
+        button_layout.addStretch(1)
+        button_layout.addWidget(ok)
+        button_layout.addStretch(1)
+
+        main.addStretch(1)
+        main.addWidget(card, 0, Qt.AlignCenter)
+        main.addLayout(button_layout)
+        main.addStretch(1)
 
     def build_ui(self):
         self.debug_button = QPushButton("Debug")

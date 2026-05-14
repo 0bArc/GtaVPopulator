@@ -128,3 +128,19 @@ def discover_bootstrap_pipeline_methods(plugin):
                     names.add(inner)
                 break
     return sorted(names)
+
+
+def discover_ui_render_methods(plugin):
+    """Return pipeline name strings for methods ui_render_<name>_hook etc."""
+    names = set()
+    for key in dir(type(plugin)):
+        if not key.startswith("ui_render_"):
+            continue
+        for suffix in ("_hook", "_process", "_core", "_internal"):
+            if key.endswith(suffix):
+                inner = key[len("ui_render_") : -len(suffix)]
+                if inner:
+                    names.add(inner)
+                break
+    return sorted(names)
+

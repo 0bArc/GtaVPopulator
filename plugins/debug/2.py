@@ -4,6 +4,7 @@ from PyQt5.QtWidgets import QMessageBox
 
 from core.PluginManager import Helper, PluginBase
 
+disabled = True
 
 class Plugin(PluginBase):
     """
@@ -67,4 +68,5 @@ class Plugin(PluginBase):
             )
 
 
-Helper.plugin(Plugin)
+if not disabled:
+    Helper.plugin(Plugin)

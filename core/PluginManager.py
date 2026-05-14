@@ -4,7 +4,7 @@ import traceback
 from pathlib import Path
 from collections import defaultdict
 
-from core.plugin_permissions import analyze_python_plugin_source
+from core.plugin_permissions import analyze_python_plugin_source, score_dangerous_tags_by_source
 
 
 class Helper:
@@ -497,6 +497,8 @@ class PluginManager:
 
                 if not bootstrap:
                     report = analyze_python_plugin_source(plugin_file)
+                    report["score"] = score_dangerous_tags_by_source(plugin_file.read_text())
+                    report["dangerous"] = report["score"] > 0
                     setattr(plugin, "__plugin_permission_report__", report)
                     key = str(plugin_file.resolve())
                     perms = report.get("permissions") or []
