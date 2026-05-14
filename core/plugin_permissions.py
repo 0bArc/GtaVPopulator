@@ -1,124 +1,133 @@
 """
 Static scan of plugin .py sources for capability hints (not sandbox enforcement).
+Improved scoring + more dangerous markers.
 """
 
 from pathlib import Path
 
+# ==================== DANGEROUS MARKERS ====================
 
 _DANGEROUS_MARKERS = (
+    # === High Risk (Code Execution) ===
     ("eval(", "dynamic_exec"),
     ("exec(", "dynamic_exec"),
     ("compile(", "dynamic_exec"),
     ("__import__(", "dynamic_import"),
+    ("importlib.import_module", "dynamic_import"),
+    
+    # === Unsafe Deserialization ===
     ("pickle.loads", "unsafe_deserialize"),
+    ("pickle.load", "unsafe_deserialize"),
     ("marshal.loads", "unsafe_deserialize"),
+    ("yaml.load", "unsafe_deserialize"),           # especially without SafeLoader
+    ("yaml.full_load", "unsafe_deserialize"),
+    
+    # === Native / Memory Unsafe ===
     ("ctypes.", "native_bridge"),
-    ("os.system", "subprocess"),
-    ("os.popen", "subprocess"),
+    ("cffi.", "native_bridge"),
+    ("pywin32", "native_bridge"),
+    
+    # === Subprocess / Shell Execution ===
     ("subprocess.", "subprocess"),
+    ("os.system(", "subprocess"),
+    ("os.popen", "subprocess"),
+    ("os.spawn", "subprocess"),
+    ("commands.getoutput", "subprocess"),
+    ("commands.getstatusoutput", "subprocess"),
+    
+    # === Network ===
     ("socket.", "network"),
     ("urllib.request", "network"),
+    ("urllib3", "network"),
     ("requests.", "network"),
     ("httpx.", "network"),
     ("aiohttp.", "network"),
     ("ftplib.", "network"),
     ("smtplib.", "network"),
+    ("http.client", "network"),
+    
+    # === Filesystem Dangerous Operations ===
     ("shutil.rmtree", "filesystem_write"),
     ("os.remove", "filesystem_write"),
     ("os.unlink", "filesystem_write"),
     ("Path.unlink", "filesystem_write"),
+    ("os.rmdir", "filesystem_write"),
+    ("shutil.move", "filesystem_write"),
+    ("os.rename", "filesystem_write"),          # can be used maliciously
+    ("open(", "filesystem_write"),              # broad, but useful signal
+    
+    # === Privilege / System ===
+    ("os.exec", "system_execution"),
+    ("runas", "privilege_escalation"),
+    ("admin", "privilege_escalation"),          # heuristic
+    
+    # === Debugging / Injection ===
+    ("pdb.", "debug_tools"),
+    ("code.interact", "debug_tools"),
+    ("breakpoint(", "debug_tools"),
 )
 
-_DANGEROUS_ONLY = frozenset(
-    {
-        "dynamic_exec",
-        "unsafe_deserialize",
-        "native_bridge",
-        "subprocess",
-    }
-)
+# Tags that make a plugin "dangerous" by default
+_DANGEROUS_ONLY = frozenset({
+    "dynamic_exec",
+    "unsafe_deserialize",
+    "native_bridge",
+    "subprocess",
+    "system_execution",
+    "privilege_escalation",
+})
 
 
 def score_dangerous_tags_by_source(source: str) -> int:
     """
-    Score dangerous tags by source text.
+    Properly calculate danger score based on what was ACTUALLY found.
     """
-    base_score = 0
-    
-    # if dynamic_exec or subprocess, add 10 points, if network add 5
-    for needle, tag in _DANGEROUS_MARKERS:
+    if not source:
+        return 0
 
-        if tag in _DANGEROUS_ONLY:
-            base_score += 10
-        elif tag == "network":
-            base_score += 5
-        elif tag == "filesystem_write":
-            base_score += 5
-        elif tag == "native_bridge":
-            base_score += 5
-        elif tag == "unsafe_deserialize":
-            base_score += 5
-        elif tag == "dynamic_exec":
-            base_score += 5
-        elif tag == "subprocess":
-            base_score += 5
-        elif tag == "native_bridge":
-            base_score += 5
-        elif tag == "unsafe_deserialize":
-            base_score += 5
-        elif tag == "dynamic_import":
-            base_score += 5
-        elif tag == "pickle.loads":
-            base_score += 5
-        elif tag == "marshal.loads":
-            base_score += 5
-        elif tag == "ctypes.":
-            base_score += 5
-        elif tag == "os.system":
-            base_score += 5
-        elif tag == "os.popen":
-            base_score += 5
-        elif tag == "subprocess.":
-            base_score += 5
-        elif tag == "socket.":
-            base_score += 5
-        elif tag == "urllib.request":
-            base_score += 5
-        elif tag == "requests.":
-            base_score += 5
-        elif tag == "httpx.":
-            base_score += 5
-        elif tag == "aiohttp.":
-            base_score += 5
-        elif tag == "ftplib.":
-            base_score += 5
-        elif tag == "smtplib.":
-            base_score += 5
-        elif tag == "shutil.rmtree":
-            base_score += 5
-        elif tag == "os.remove":
-            base_score += 5
-        elif tag == "os.unlink":
-            base_score += 5
-        elif tag == "Path.unlink":
-            base_score += 5
-    
-    return base_score
+    lower = source.lower()
+    score = 0
+    found_tags = set()
+
+    for needle, tag in _DANGEROUS_MARKERS:
+        if needle.lower() in lower:
+            if tag not in found_tags:
+                found_tags.add(tag)
+
+                if tag in _DANGEROUS_ONLY:
+                    score += 60          # High risk
+                elif tag in ("network", "filesystem_write"):
+                    score += 25
+                else:
+                    score += 15
+
+    # Multi-risk bonus
+    if len(found_tags) >= 3:
+        score += 40
+    elif len(found_tags) >= 2:
+        score += 20
+
+    # Very broad heuristic: if it imports many things + has exec/subprocess
+    if "dynamic_exec" in found_tags or "subprocess" in found_tags:
+        score += 20
+
+    return score
 
 
 def analyze_python_plugin_source(path: Path) -> dict:
     """
-    Return permission-like tags + dangerous flag from source text heuristics.
+    Analyze a plugin file and return security report.
     """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except OSError as e:
         return {
             "path": str(path),
             "permissions": [],
             "signals": [],
             "dangerous": False,
-            "error": "unreadable",
+            "score": 0,
+            "error": f"unreadable: {e}",
         }
 
     lower = text.lower()
@@ -129,13 +138,15 @@ def analyze_python_plugin_source(path: Path) -> dict:
         if needle.lower() in lower:
             if tag not in permissions:
                 permissions.append(tag)
-            signals.append(f"{tag}:{needle}")
+            signals.append(f"{tag}:{needle.strip()}")
 
     dangerous = any(p in _DANGEROUS_ONLY for p in permissions)
+    score = score_dangerous_tags_by_source(text)
 
     return {
         "path": str(path),
         "permissions": permissions,
-        "signals": signals[:24],
+        "signals": signals[:30],           # limit output size
         "dangerous": dangerous,
+        "score": score,
     }

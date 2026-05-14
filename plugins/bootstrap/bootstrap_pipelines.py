@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from core.PluginManager import Helper, PluginBase
@@ -16,6 +17,10 @@ class Plugin(PluginBase):
 
         reports = state.setdefault("reports", [])
         stage = state.get("stage", "")
+
+        if os.environ.get("GTA_POPULATOR_SCAN_PLUGINS_ON_LOAD") != "1":
+            manager.context["permission_pipeline_last"] = dict(state)
+            return state
 
         if stage == "bootstrap":
             for path in manager.bootstrap_files():
