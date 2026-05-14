@@ -122,7 +122,7 @@ class Gta5Populator:
         category = self.plugin_manager.first_result("detect_category", self, path)
         return category or "BaseGame"
 
-    def clean_name(self, name: str):
+    def clean_name(self, name: str, aliases=None):
         name = name.replace(".disabled", "")
         lowered = name.lower()
 
@@ -131,7 +131,10 @@ class Gta5Populator:
         if plugin_name:
             return plugin_name
 
-        for key, value in self.plugin_manager.aliases().items():
+        if aliases is None:
+            aliases = self.plugin_manager.aliases()
+
+        for key, value in aliases.items():
             if lowered.startswith(key):
                 return value
 
@@ -165,53 +168,77 @@ class Gta5Populator:
     # FILE SCANNING
     # =====================================================
 
+    def iter_files(self, directory: Path):
+        stack = [directory]
+
+        while stack:
+            current = stack.pop()
+
+            try:
+                entries = list(os.scandir(current))
+            except OSError:
+                continue
+
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        yield Path(entry.path)
+                except OSError:
+                    continue
+
     def scan_files(self, initial=False):
-        self.categories = self.empty_categories()
+        plugin_manager = self.plugin_manager
+        categories = plugin_manager.categories()
+        supported_extensions = plugin_manager.supported_extensions()
+        ignored_stems = plugin_manager.ignored_stems()
+        ignored_parent_names = plugin_manager.ignored_parent_names()
+        aliases = plugin_manager.aliases()
+
+        self.categories = {category: [] for category in categories}
 
         grouped = {
             category: defaultdict(list)
-            for category in self.plugin_manager.categories()
+            for category in categories
         }
 
         self.detected_files = []
-        self.plugin_manager.hook("before_scan", self, initial)
+        plugin_manager.hook("before_scan", self, initial)
 
         for directory in self.paths:
             if not directory.exists():
                 continue
 
-            for file in directory.rglob("*"):
-                if not file.is_file():
-                    continue
-
+            for file in self.iter_files(directory):
                 is_disabled = file.suffix == ".disabled"
-                actual_file = self.plugin_manager.first_result(
+                actual_file = plugin_manager.first_result(
                     "normalize_file_path", self, file, is_disabled
                 )
 
                 if actual_file is None:
                     actual_file = file.with_suffix("") if is_disabled else file
 
-                include_file = self.plugin_manager.first_result(
+                include_file = plugin_manager.first_result(
                     "should_include_file", self, file, actual_file
                 )
 
                 if include_file is False:
                     continue
 
-                if include_file is None and actual_file.suffix.lower() not in self.plugin_manager.supported_extensions():
+                if include_file is None and actual_file.suffix.lower() not in supported_extensions:
                     continue
 
                 stem = actual_file.stem
 
-                if stem.lower() in self.plugin_manager.ignored_stems():
+                if stem.lower() in ignored_stems:
                     continue
 
                 file_hash = self.hash_file(file)
 
                 if file_hash not in self.known_files and not initial:
                     self.detected_files.append(file)
-                    self.plugin_manager.hook("on_new_file_detected", self, file)
+                    plugin_manager.hook("on_new_file_detected", self, file)
 
                 self.known_files.add(file_hash)
 
@@ -220,16 +247,16 @@ class Gta5Populator:
                 self.categories.setdefault(category, [])
                 parent_name = file.parent.name
 
-                plugin_bundle_name = self.plugin_manager.first_result(
+                plugin_bundle_name = plugin_manager.first_result(
                     "get_bundle_name", self, file, actual_file, category
                 )
 
                 if plugin_bundle_name:
                     bundle_name = plugin_bundle_name
-                elif parent_name.lower() not in self.plugin_manager.ignored_parent_names():
+                elif parent_name.lower() not in ignored_parent_names:
                     bundle_name = parent_name
                 else:
-                    bundle_name = self.clean_name(stem)
+                    bundle_name = self.clean_name(stem, aliases)
 
                 file_data = {
                     "path": file,
@@ -238,7 +265,7 @@ class Gta5Populator:
                 }
 
                 grouped[category][bundle_name].append(file_data)
-                self.plugin_manager.hook(
+                plugin_manager.hook(
                     "on_file_grouped", self, file, category, bundle_name, file_data
                 )
 
@@ -257,14 +284,14 @@ class Gta5Populator:
                         "active": active,
                     }
                 )
-                self.plugin_manager.hook(
+                plugin_manager.hook(
                     "after_bundle_built", self, category, final_bundles[-1]
                 )
 
             final_bundles.sort(key=lambda x: x["name"].lower())
             self.categories[category] = final_bundles
 
-        self.plugin_manager.hook("after_scan", self, initial, grouped)
+        plugin_manager.hook("after_scan", self, initial, grouped)
 
     # =====================================================
     # TOGGLE
@@ -309,6 +336,7 @@ class Gta5PopulatorWindow(QMainWindow):
         self.current_bundles = []
         self.filtered_bundles = []
         self.plugin_debugger = None
+        self._selected_bundle_signature = None
         self._plugin_ui_refs = {
             "toolbar_actions": [],
             "menu_actions": [],
@@ -527,6 +555,32 @@ class Gta5PopulatorWindow(QMainWindow):
 
         if menu.actions():
             menu.exec_(self.file_list.mapToGlobal(pos))
+
+    def _ack_plugin_review(self, path_key):
+            """
+            Acknowledge (dismiss) a plugin review warning.
+            """
+            pm = self.manager.plugin_manager
+            
+            # Remove from review queue
+            queue = pm.context.get("plugin_review_queue", [])
+            pm.context["plugin_review_queue"] = [
+                item for item in queue if item.get("path") != path_key
+            ]
+
+            # Add to reviewed paths so it doesn't show again
+            if path_key:
+                self.manager.reviewed_plugin_paths.add(path_key)
+                self.manager.save_config()
+
+            # Refresh the review card
+            if hasattr(self, "_plugin_review_card"):
+                self._plugin_review_card.hide()
+
+            # Re-present next item if any remain
+            QTimer.singleShot(100, self._present_plugin_review_queue)
+
+            self.show_message("Plugin review acknowledged.")
 
     def _present_plugin_review_queue(self):
         queue = self.manager.plugin_manager.context.get("plugin_review_queue") or []
@@ -1318,13 +1372,22 @@ class Gta5PopulatorWindow(QMainWindow):
 
     def on_bundle_selected(self):
         bundle = self.current_bundle()
-        self.file_list.clear()
 
         if not bundle:
+            self._selected_bundle_signature = None
+            self.file_list.clear()
             self.bundle_title.setText("No mod selected")
             self.bundle_summary.setText("No mods found in this category.")
             self.toggle_button.setEnabled(False)
             return
+
+        signature = self.bundle_signature(bundle)
+
+        if signature == self._selected_bundle_signature:
+            return
+
+        self._selected_bundle_signature = signature
+        self.file_list.clear()
 
         status = "enabled" if bundle["active"] else "disabled"
 
@@ -1374,6 +1437,19 @@ class Gta5PopulatorWindow(QMainWindow):
         self.toggle_button.setText(action)
         self.toggle_button.setEnabled(True)
         self.manager.plugin_manager.hook("on_bundle_selected", self.manager, bundle)
+
+    def bundle_signature(self, bundle):
+        return (
+            bundle.get("name"),
+            bundle.get("active"),
+            tuple(
+                (
+                    str(file_data.get("path")),
+                    bool(file_data.get("active")),
+                )
+                for file_data in bundle.get("files", [])
+            ),
+        )
 
     def on_bundle_double_clicked(self, item):
         bundle_name = item.data(Qt.UserRole)

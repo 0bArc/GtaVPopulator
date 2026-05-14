@@ -1016,7 +1016,10 @@ class PluginDebuggerWindow(QMainWindow):
                 self.apply_hook_table_color(item, values[3])
                 self.hook_table.setItem(row, column, item)
 
-        self.hook_table.resizeRowsToContents()
+        if len(rows) <= 300:
+            self.hook_table.resizeRowsToContents()
+        else:
+            self.hook_table.verticalHeader().setDefaultSectionSize(24)
 
     def hook_layer(self, callback_name):
         for suffix in ("_hook", "_process", "_core", "_internal"):
@@ -1038,37 +1041,33 @@ class PluginDebuggerWindow(QMainWindow):
     def refresh_event_log(self):
         lines = []
 
-        for event in self.plugin_manager.event_log:
+        for event in self.plugin_manager.event_log[-1000:]:
             data = event.get("data") or {}
             detail = ", ".join(f"{key}={value}" for key, value in data.items())
             suffix = f" | {detail}" if detail else ""
             code = event["code"]
-            color = self.event_color(code)
             lines.append(
-                f'<span style="color:#707070">{event["index"]:04d}</span> '
-                f'<span style="color:{color}; font-weight:700">[{code}]</span> '
-                f'<span style="color:#ffffff">{self.escape_html(str(event["message"]))}</span>'
-                f'<span style="color:#a9a9a9">{self.escape_html(suffix)}</span>'
+                f'{event["index"]:04d} [{code}] {event["message"]}{suffix}'
             )
 
-        self.event_log.setHtml("<br>".join(lines))
+        self.event_log.setPlainText("\n".join(lines))
         self.event_log.moveCursor(self.event_log.textCursor().End)
 
     def refresh_error_log(self):
         if not self.plugin_manager.errors:
-            self.error_log.setHtml('<span style="color:#9dffb0">No plugin errors.</span>')
+            self.error_log.setPlainText("No plugin errors.")
             return
 
         lines = []
 
         for index, error in enumerate(self.plugin_manager.errors, start=1):
-            lines.append(f'<span style="color:#ff5c5c; font-weight:700">ERROR {index}</span>')
-            lines.append(f'<span style="color:#ffd56f">Plugin:</span> {self.escape_html(error.get("plugin", ""))}')
-            lines.append(f'<span style="color:#ffd56f">Hook:</span> {self.escape_html(error.get("hook", ""))}')
-            lines.append(f'<span style="color:#ffd56f">Message:</span> {self.escape_html(error.get("error", ""))}')
-            lines.append(f'<pre style="color:#ff9f80; white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere">{self.escape_html(error.get("traceback", ""))}</pre>')
+            lines.append(f"ERROR {index}")
+            lines.append(f'Plugin: {error.get("plugin", "")}')
+            lines.append(f'Hook: {error.get("hook", "")}')
+            lines.append(f'Message: {error.get("error", "")}')
+            lines.append(str(error.get("traceback", "")))
 
-        self.error_log.setHtml("<br>".join(lines))
+        self.error_log.setPlainText("\n".join(lines))
 
     def event_color(self, code):
         if "ERROR" in code:
@@ -1100,68 +1099,18 @@ class PluginDebuggerWindow(QMainWindow):
 
     def refresh_context_view(self):
         if not self.plugin_manager.context:
-            self.context_view.setHtml(
-                '<span style="color:#777">No context values.</span>'
-            )
+            self.context_view.setPlainText("No context values.")
             return
 
-        hp = getattr(self, "_html_body_px", 13)
         cw = getattr(self, "_ctx_pre_width", 72)
-        html = [
-            f"""
-            <div style="
-                font-family:Consolas;
-                font-size:{hp}px;
-                color:white;
-            ">
-            """
-        ]
-
-        colors = {
-            "dict": "#8be9fd",
-            "list": "#ffb86c",
-            "key": "#50fa7b",
-            "value": "#f8f8f2",
-        }
+        lines = []
 
         for key, value in sorted(self.plugin_manager.context.items()):
-            if isinstance(value, dict):
-                color = colors["dict"]
-            elif isinstance(value, list):
-                color = colors["list"]
-            else:
-                color = colors["value"]
+            lines.append(str(key))
+            lines.append(pformat(value, width=cw))
+            lines.append("")
 
-            formatted = self.escape_html(
-                pformat(value, width=cw)
-            )
-
-            html.append(
-                f"""
-                <div style="margin-bottom:10px;">
-                    <span style="
-                        color:{colors['key']};
-                        font-weight:bold;
-                    ">
-                        {self.escape_html(str(key))}
-                    </span>
-
-                    <pre style="
-                        margin:4px 0 0 12px;
-                        color:{color};
-                        white-space:pre-wrap;
-                        word-break:break-word;
-                        overflow-wrap:anywhere;
-                    ">
-    {formatted}
-                    </pre>
-                </div>
-                """
-            )
-
-        html.append("</div>")
-
-        self.context_view.setHtml("".join(html))
+        self.context_view.setPlainText("\n".join(lines))
 
     def clear_event_log(self):
         self.plugin_manager.event_log.clear()

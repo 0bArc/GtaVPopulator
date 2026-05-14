@@ -73,8 +73,6 @@ class Plugin(PluginBase):
         bundle_name = str(bundle.get("name", ""))
         lowered = bundle_name.lower()
 
-        print(f"[EXTRA_INFO] Checking bundle: {bundle_name}")
-
         segments = [
             segment
             for segment in re.split(r"[._\\-]", lowered)
@@ -110,7 +108,6 @@ class Plugin(PluginBase):
                 )
 
         if not matches:
-            print(f"[EXTRA_INFO] No match for: {bundle_name}")
             return None
 
         # Highest priority first
@@ -118,8 +115,6 @@ class Plugin(PluginBase):
         matches.sort(reverse=True)
 
         _, _, matched_key, matched_info = matches[0]
-
-        print(f"[EXTRA_INFO] Matched: {matched_key}")
 
         return {
             "title": matched_info.get("title", bundle_name),

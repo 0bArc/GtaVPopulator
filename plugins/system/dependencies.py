@@ -159,17 +159,8 @@ class Plugin(PluginBase):
 
     def on_ui_ready_hook(self, manager, window):
         """
-        Print dependency warnings into console for debugging.
+        Dependency warnings are shown in UI; avoid console I/O during startup.
         """
-
-        warnings = (
-            manager.context
-            .get("dependency_warnings", {})
-            .get("missing", [])
-        )
-
-        for warning in warnings:
-            print(f"[DEPENDENCY WARNING] {warning}")
 
 
 Helper.plugin(Plugin)

@@ -1,10 +1,11 @@
 import importlib.util
+import os
 import traceback
 
 from pathlib import Path
 from collections import defaultdict
 
-from core.plugin_permissions import analyze_python_plugin_source, score_dangerous_tags_by_source
+from core.plugin_permissions import analyze_python_plugin_source
 
 
 class Helper:
@@ -228,6 +229,7 @@ class PluginBase:
         return None
 
 
+
 def _noop(*args, **kwargs):
     return None
 
@@ -326,6 +328,14 @@ class PluginManager:
         self.loaded_files = set()
         self._loaded_modules = set()
         self._executed_hooks = set()
+        self._callback_cache = {}
+        self._callback_name_cache = {}
+        self._event_index = 0
+        self._event_log_max = 1000
+        self._verbose_events = os.environ.get("GTA_POPULATOR_VERBOSE_EVENTS") == "1"
+        self._scan_plugin_sources_on_load = (
+            os.environ.get("GTA_POPULATOR_SCAN_PLUGINS_ON_LOAD") == "1"
+        )
         self.reviewed_plugin_paths = reviewed_plugin_paths
         if self.reviewed_plugin_paths is None:
             self.reviewed_plugin_paths = set()
@@ -367,6 +377,7 @@ class PluginManager:
 
         self.plugins.append(plugin)
         self.plugins.sort(key=lambda item: getattr(item, "priority", 100))
+        self._callback_cache.clear()
         self.log_event(
             "PLUGIN_REGISTERED",
             getattr(plugin, "name", plugin.__class__.__name__),
@@ -467,6 +478,10 @@ class PluginManager:
             # Let the module breathe and execute its code once
             spec.loader.exec_module(module)
 
+            if getattr(module, "isEnabled", True) is False:
+                self.log_event("PLUGIN_DISABLED", str(plugin_file), file=str(plugin_file))
+                return None
+
             has_plugin_class = hasattr(module, "Plugin")
             has_register = hasattr(module, "register")
 
@@ -495,10 +510,8 @@ class PluginManager:
                 setattr(plugin, "__plugin_file__", str(plugin_file))
                 setattr(plugin, "__plugin_bootstrap__", bootstrap)
 
-                if not bootstrap:
+                if not bootstrap and self._scan_plugin_sources_on_load:
                     report = analyze_python_plugin_source(plugin_file)
-                    report["score"] = score_dangerous_tags_by_source(plugin_file.read_text())
-                    report["dangerous"] = report["score"] > 0
                     setattr(plugin, "__plugin_permission_report__", report)
                     key = str(plugin_file.resolve())
                     perms = report.get("permissions") or []
@@ -543,69 +556,130 @@ class PluginManager:
 
     def hook(self, hook_name, *args, **kwargs):
         results = []
-        self.log_event("HOOK_START", hook_name, hook=hook_name)
 
-        for plugin in self.plugins:
-            for callback_name in self.callback_names(hook_name):
-                result = self.call_plugin(plugin, callback_name, *args, **kwargs)
+        for plugin, callback_name in self.callbacks_for(hook_name):
+            result = self.call_plugin(plugin, callback_name, *args, **kwargs)
 
-                if result is not None:
-                    results.append(result)
+            if result is not None:
+                results.append(result)
 
-        self.log_event("HOOK_DONE", hook_name, hook=hook_name, results=len(results))
+        for callback_name in self.helper_patch_names(hook_name):
+            result = self.run_helper_patch(callback_name, None, *args, **kwargs)
+
+            if result is not None:
+                results.append(result)
+
         return results
 
     def hook_extension(self, manager, area, phase, *args, **kwargs):
         results = []
-        label = f"{area}.{phase}"
-        self.log_event("HOOK_EXTENSION_START", label, area=area, phase=phase)
 
-        for plugin in self.plugins:
-            for callback_name in self.callback_names("extension_point"):
-                result = self.call_plugin(
-                    plugin, callback_name, manager, area, phase, *args, **kwargs
-                )
+        for plugin, callback_name in self.callbacks_for("extension_point"):
+            result = self.call_plugin(
+                plugin, callback_name, manager, area, phase, *args, **kwargs
+            )
 
-                if result is not None:
-                    results.append(result)
+            if result is not None:
+                results.append(result)
 
-        self.log_event(
-            "HOOK_EXTENSION_DONE",
-            label,
-            area=area,
-            phase=phase,
-            results=len(results),
-        )
         return results
 
     def first_result(self, hook_name, *args, **kwargs):
-        self.log_event("FIRST_RESULT_START", hook_name, hook=hook_name)
+        callbacks = self.callbacks_for(hook_name, reverse=True)
+        ran_helper_patches = set()
 
-        for plugin in reversed(self.plugins):
-            for callback_name in self.callback_names(hook_name):
-                result = self.call_plugin(plugin, callback_name, *args, **kwargs)
+        if hook_name in Helper._patches and not any(
+            callback_name == hook_name for _, callback_name in callbacks
+        ):
+            result = self.run_helper_patch(hook_name, None, *args, **kwargs)
+            ran_helper_patches.add(hook_name)
 
-                if result is not None:
-                    self.log_event(
-                        "FIRST_RESULT_FOUND",
-                        hook_name,
-                        hook=hook_name,
-                        callback=callback_name,
-                        plugin=getattr(plugin, "name", plugin.__class__.__name__),
-                        result=repr(result),
-                    )
-                    return result
+            if result is not None:
+                return result
 
-        self.log_event("FIRST_RESULT_EMPTY", hook_name, hook=hook_name)
+        for plugin, callback_name in callbacks:
+            result = self.call_plugin(plugin, callback_name, *args, **kwargs)
+
+            if result is not None:
+                return result
+
+        for callback_name in self.helper_patch_names(hook_name):
+            if callback_name in ran_helper_patches:
+                continue
+
+            result = self.run_helper_patch(callback_name, None, *args, **kwargs)
+
+            if result is not None:
+                return result
+
         return None
 
     def callback_names(self, hook_name):
+        cached = self._callback_name_cache.get(hook_name)
+
+        if cached is not None:
+            return cached
+
         names = [hook_name]
 
         for suffix in ("hook", "process", "core", "internal"):
             names.append(f"{hook_name}_{suffix}")
 
+        names = tuple(names)
+        self._callback_name_cache[hook_name] = names
         return names
+
+    def callbacks_for(self, hook_name, reverse=False):
+        key = (hook_name, reverse)
+        cached = self._callback_cache.get(key)
+
+        if cached is not None:
+            return cached
+
+        plugins = reversed(self.plugins) if reverse else self.plugins
+        callbacks = []
+
+        for plugin in plugins:
+            for callback_name in self.callback_names(hook_name):
+                if self.has_callback(plugin, callback_name):
+                    callbacks.append((plugin, callback_name))
+
+        callbacks = tuple(callbacks)
+        self._callback_cache[key] = callbacks
+        return callbacks
+
+    def has_callback(self, plugin, callback_name):
+        plugin_dict = getattr(plugin, "__dict__", {})
+
+        if callback_name in plugin_dict:
+            return callable(plugin_dict.get(callback_name))
+
+        plugin_class = getattr(plugin, "__class__", None)
+
+        if plugin_class is not None and callback_name in getattr(plugin_class, "__dict__", {}):
+            return callable(getattr(plugin, callback_name, None))
+
+        return False
+
+    def helper_patch_names(self, hook_name):
+        return [
+            callback_name
+            for callback_name in self.callback_names(hook_name)
+            if callback_name in Helper._patches
+        ]
+
+    def run_helper_patch(self, callback_name, result, *args, **kwargs):
+        return Helper.run(
+            callback_name,
+            result,
+            {
+                "plugin_manager": self,
+                "plugin": None,
+                "callback": callback_name,
+                "args": args,
+                "kwargs": kwargs,
+            },
+        )
 
     def call_plugin(self, plugin, callback_name, *args, **kwargs):
         callback = getattr(plugin, callback_name, None)
@@ -614,12 +688,6 @@ class PluginManager:
             return None
 
         try:
-            self.log_event(
-                "CALL",
-                callback_name,
-                plugin=getattr(plugin, "name", plugin.__class__.__name__),
-                callback=callback_name,
-            )
             result = callback(*args, **kwargs)
             result = Helper.run(
                 callback_name,
@@ -632,15 +700,6 @@ class PluginManager:
                     "kwargs": kwargs,
                 },
             )
-
-            if result is not None:
-                self.log_event(
-                    "CALL_RESULT",
-                    callback_name,
-                    plugin=getattr(plugin, "name", plugin.__class__.__name__),
-                    callback=callback_name,
-                    result=repr(result),
-                )
 
             return result
         except Exception as exc:
@@ -670,14 +729,35 @@ class PluginManager:
         self.hook("on_plugin_error", self, error)
 
     def log_event(self, code, message, **data):
+        noisy_codes = {
+            "HOOK_START",
+            "HOOK_DONE",
+            "HOOK_EXTENSION_START",
+            "HOOK_EXTENSION_DONE",
+            "FIRST_RESULT_START",
+            "FIRST_RESULT_FOUND",
+            "FIRST_RESULT_EMPTY",
+            "CALL",
+            "CALL_RESULT",
+        }
+
+        if not self._verbose_events and code in noisy_codes:
+            return
+
+        self._event_index += 1
         self.event_log.append(
             {
-                "index": len(self.event_log) + 1,
+                "index": self._event_index,
                 "code": code,
                 "message": message,
                 "data": data,
             }
         )
+
+        overflow = len(self.event_log) - self._event_log_max
+
+        if overflow > 0:
+            del self.event_log[:overflow]
 
     def supported_extensions(self):
         extensions = set()
@@ -725,12 +805,11 @@ class PluginManager:
         state = initial_state
         prefix = f"bootstrap_pipeline_{pipeline_name}"
 
-        for plugin in self.plugins:
-            for callback_name in self.callback_names(prefix):
-                result = self.call_plugin(plugin, callback_name, self, state)
+        for plugin, callback_name in self.callbacks_for(prefix):
+            result = self.call_plugin(plugin, callback_name, self, state)
 
-                if result is not None:
-                    state = result
+            if result is not None:
+                state = result
 
         self.log_event(
             "BOOTSTRAP_PIPELINE_DONE",
@@ -755,18 +834,17 @@ class PluginManager:
         ctx = dict(context or {})
         collected = []
 
-        for plugin in self.plugins:
-            for callback_name in self.callback_names("ui_render"):
-                result = self.call_plugin(
-                    plugin, callback_name, manager, window, slot, ctx
-                )
+        for plugin, callback_name in self.callbacks_for("ui_render"):
+            result = self.call_plugin(
+                plugin, callback_name, manager, window, slot, ctx
+            )
 
-                if not result:
-                    continue
+            if not result:
+                continue
 
-                if isinstance(result, (list, tuple)):
-                    collected.extend(result)
-                else:
-                    collected.append(result)
+            if isinstance(result, (list, tuple)):
+                collected.extend(result)
+            else:
+                collected.append(result)
 
         return collected

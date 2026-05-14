@@ -1,6 +1,6 @@
 from core.PluginManager import Helper, PluginBase
 
-isEnabled = True
+isEnabled = False
 
 class Plugin(PluginBase):
     name = "UI Enhanced"
@@ -22,8 +22,6 @@ class Plugin(PluginBase):
     def on_app_start_hook(self, manager):
         self.ensure_state(manager)
 
-        print("[UI_ENHANCED] Loaded")
-
     def before_scan_hook(self, manager, initial):
         self.ensure_state(manager)
 
@@ -32,8 +30,6 @@ class Plugin(PluginBase):
         state["bundles"] = 0
         state["files"] = 0
         state["groups"] = {}
-
-        print("[UI_ENHANCED] Scan started")
 
     def after_bundle_built_hook(self, manager, category, bundle):
         self.ensure_state(manager)
@@ -44,11 +40,6 @@ class Plugin(PluginBase):
 
         state["groups"][bundle["name"]] = group
         state["bundles"] += 1
-
-        print(
-            f"[UI_ENHANCED] Bundle built: "
-            f"{bundle['name']} -> {group}"
-        )
 
     def format_bundle_row_hook(self, manager, bundle, default_text):
         group = self.bundle_group(bundle["name"])
